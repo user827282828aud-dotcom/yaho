@@ -1,0 +1,12992 @@
+if getgenv().UIW then
+    pcall(function()
+        getgenv().UIW:Destroy()
+    end)
+elseif getgenv().UNDERWORLD_AI then
+    pcall(function()
+        getgenv().UNDERWORLD_AI:Destroy()
+    end)
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local PathfindingService = game:GetService("PathfindingService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local Stats = game:GetService("Stats")
+
+local LocalPlayer = Players.LocalPlayer
+
+local CONFIG = {
+    WalkSpeed = 20,
+
+    DesiredCombatRange = 42,
+    MinimumCombatRange = 22,
+
+    -- Ice Crash's replicated hitbox template reaches about 66 studs forward.
+    -- 64 keeps a small safety margin while still attacking much earlier than before.
+    DamageCastRange = 64,
+
+    -- Stop just outside the attack zone until the next Q/E sequence is ready.
+    -- This prevents walking into a fresh pack while damage skills are still cooling.
+    PreAggroHoldDistance = 72,
+    AttackCommitWindow = 2.75,
+
+    AggressiveApproachDistance = 52,
+
+    -- Always Moving mode: sweep the current room to aggro the pack, keep moving
+    -- while dodging, then release AoE damage once the room is gathered.
+    -- Always Moving is a real pull/kite mode: move forward through the room,
+    -- tag every mob by getting close enough to aggro it, then kite the whole pack
+    -- to one anchor before releasing Q/E.
+    AlwaysMoveGatherRange = 62,
+    AlwaysMoveAggroVisitRange = 48,
+    AlwaysMovePackRadius = 44,
+    AlwaysMoveSweepTimeout = 14.0,
+    AlwaysMoveGatherTimeout = 10.0,
+    AlwaysMoveAnchorReachDistance = 5.5,
+    AlwaysMoveDirectStep = 12,
+    AlwaysMoveWrapTriggerCount = 2,
+    AlwaysMoveWrapRadius = 42,
+    AlwaysMoveWrapLookahead = 10,
+    AlwaysMoveWrapForwardBias = 0.28,
+    AlwaysMoveWrapTangentialBias = 1.15,
+    -- Wide pack orbit: get outside the melee ball before circling it.
+    AlwaysMoveOrbitInnerRadius = 28,
+    AlwaysMoveOrbitTargetRadius = 33,
+    AlwaysMoveOrbitOuterRadius = 38,
+    AlwaysMoveOrbitRadialLookahead = 9,
+
+    -- Demon Warrior behavior. Live damage captures showed three Warriors landing
+    -- hits at roughly 7-9 studs while UIW was still moving normally. Enter panic
+    -- well before that range, keep orbit pressure, and do not release panic until
+    -- the whole melee cluster has been opened back up.
+    MeleeSafetyRadius = 34,
+    MeleeEmergencyRadius = 24,
+    MeleePanicExitRadius = 32,
+    ProximitySafetyBonus = 8,
+    ProximityEmergencyBonus = 6,
+    MeleeClusterPanicRadius = 27,
+    MeleeClusterPanicCount = 2,
+    MeleeHardNoGoRadius = 15,
+    MeleeOrbitInner = 30,
+    MeleeOrbitOuter = 40,
+    MultiMeleeRadius = 46,
+    MeleeTravelOverrideDistance = 58,
+
+    GoalChangeThreshold = 18,
+    DirectPathDistance = 42,
+
+    -- Navigation v2: one authoritative Roblox path.
+    PathAgentRadius = 2.25,
+    PathAgentHeight = 5,
+    PathWaypointSpacing = 4,
+    PathWaypointStartRadius = 2,
+    PathPlaneVelocityMultiplier = 0.0625,
+    PathPlaneMinThreshold = 1.0,
+    PathGoalReachDistance = 3.5,
+    ProgressionCheckpointReachDistance = 2.25,
+    ProgressionProbeRetry = 0.45,
+    ProgressionFrontierReachDistance = 5.0,
+    ProgressionFrontierProbeRadii = {24, 40, 58},
+    ProgressionFrontierMinProgress = 3.0,
+    -- Smooth frontier search: never burst dozens of path computations in one frame.
+    ProgressionFrontierProbeBudget = 3,
+    ProgressionFrontierCacheTTL = 1.15,
+    ProgressionFrontierFailureCacheTTL = 0.55,
+    PathJumpRetry = 0.40,
+    PathStuckRepathTime = 0.70,
+    PathRecomputeThrottle = 0.30,
+
+    -- NoPath recovery. Roblox PFS can report NoPath across walkable dungeon
+    -- geometry (confirmed live in Volcanic Chambers room7 -> room8). When that
+    -- happens, build one sticky ground-grid route; normal PFS remains primary.
+    NoPathRetryInterval = 0.80,
+    NoPathRetryMaxInterval = 3.20,
+    NoPathHeavyFallbackCooldown = 2.00,
+    NoPathGridStep = 5,
+    NoPathGridMargin = 90,
+    NoPathGridMaxSpan = 430,
+    NoPathGridProbeAbove = 85,
+    NoPathGridProbeDepth = 240,
+    NoPathExpectedHeightTolerance = 14.0,
+    NoPathGroundSurfaceScanLimit = 16,
+    NoPathGridMinNormalY = 0.35,
+    NoPathGridMaxStepHeight = 5.25,
+    NoPathGridMaxNodes = 5000,
+    DirectGroundCorridorMaxDistance = 220,
+    DirectGroundCorridorStep = 12,
+    DirectGroundCorridorProbeAbove = 20,
+    NoPathGridJumpRise = 2.75,
+    NoPathEdgeProbeAbove = 10,
+    NoPathEdgeProbeDepth = 25,
+    NoPathEdgeHeightTolerance = 3.25,
+
+    -- Navigation/combat handoff.
+    TravelRouteDetourDot = 0.78,
+    TravelDirectProbeDistance = 24,
+
+    -- Navigation remains authoritative until the player is genuinely close.
+    NavigationEnterDistance = 82,
+    NavigationExitDistance = 72,
+    NavigationExitConfirmTime = 0.22,
+
+    NavigationAutoJumpCooldown = 0.55,
+
+    GroundProbeDepth = 16,
+
+    -- Hard map-edge padding. Candidate movement is rejected before reaching the ledge.
+    EdgeHardPadding = 10,
+    EdgeWarningPadding = 16,
+    EdgeCacheTTL = 0.16,
+    EdgeCacheCell = 2,
+
+    BodyPaddingXZ = 0.7,
+    BodyPaddingY = 0.25,
+
+    HazardPaddingXZ = 1.6,
+    HazardPaddingY = 0.8,
+
+    DodgeDistance = 10,
+    DangerLookaheadDistance = 8,
+    PrecastLookaheadTime = 0.65,
+    PrecastSafetyPadding = 1.5,
+    PrecastColumnHeight = 7,
+    PrecastThinHeight = 2.5,
+
+    -- Lord Varosh orb: thirdBossOrbShot is Anchored and moved by CFrame, so
+    -- AssemblyLinearVelocity is not reliable. Estimate motion from CFrame samples
+    -- and avoid its future swept path before the current hitbox reaches us.
+    ProjectilePredictionHorizon = 0.85,
+    ProjectilePredictionStep = 0.06,
+    ProjectileVelocityMin = 4,
+    ProjectileVelocitySmoothing = 0.55,
+    ProjectileExtraPaddingXZ = 1.4,
+    ProjectileExtraPaddingY = 0.6,
+
+    -- Enchanted Forest / Crystal Golem mechanics.
+    GolemRockPickupRadius = 7.0,
+    GolemRockPickupDwell = 0.18,
+    GolemRockPlaceRadius = 8.0,
+    GolemRockPlaceRetry = 2.25,
+    GolemOrbitInner = 31,
+    GolemOrbitOuter = 50,
+    GolemOrbKiteBias = 0.42,
+    GolemForcedRegionInset = 2.0,
+    GolemSweeperLeadDistance = 18,
+    GolemSweeperEndpointPadding = 10,
+
+    -- Expensive work is cached/throttled.
+    DodgeSolveInterval = 1 / 20,
+    RouteRiskInterval = 1 / 10,
+    HazardCacheInterval = 1 / 20,
+    TargetRefreshInterval = 0.10,
+    WorldRefreshInterval = 0.35,
+
+    -- Hazard lifetime is tied to the attack container's live visual state.
+    -- A short grace prevents one-frame particle toggles from deleting a real attack,
+    -- while stale invisible hitboxes stop affecting dodging almost immediately.
+    HazardVisualScanInterval = 0.075,
+    HazardSpawnGrace = 0.20,
+    HazardInactiveGrace = 0.12,
+
+    -- Secondary broad attack scan. This catches boss projectiles / damage
+    -- volumes that do not literally use the names "hitBox" or "precast".
+    BroadHazardSweepInterval = 0.35,
+    BroadHazardSweepRadius = 260,
+
+    -- ESP is visualization only. Dodging still tracks every active hazard even when
+    -- an outline is culled. Keeping the outline hidden while the player is inside a
+    -- huge box avoids the severe SelectionBox/GPU cost seen in live testing.
+    ESPInterval = 1 / 4,
+    ESPRenderDistance = 110,
+    ESPMaxEntries = 12,
+    ESPHideWhileInside = true,
+
+    -- Stuck recovery only activates when UIW is commanding movement but making no progress.
+    StuckTime = 0.45,
+    StuckEarlyVelocity = 1.15,
+    StuckEarlyTime = 0.22,
+    StuckProgressDistance = 0.85,
+    StuckRecoveryDuration = 0.58,
+
+    RouteAngles = {
+        0,
+        15, -15,
+        30, -30,
+        45, -45,
+        60, -60,
+        80, -80,
+    },
+
+    DodgeAngles = {
+        0,
+        15, -15,
+        30, -30,
+        45, -45,
+        60, -60,
+        80, -80,
+        105, -105,
+        135, -135,
+        165, -165,
+        180,
+    },
+
+    EmergencyBodyYawOffsets = {
+        0,
+        45, -45,
+        90, -90,
+        135, -135,
+        180,
+    },
+
+    Debug = false,
+}
+
+local COLORS = {
+    Idle = Color3.fromRGB(140, 143, 150),
+    Moving = Color3.fromRGB(75, 145, 255),
+    Pathing = Color3.fromRGB(240, 195, 55),
+    Combat = Color3.fromRGB(255, 145, 45),
+    Dodge = Color3.fromRGB(255, 55, 78),
+    Emergency = Color3.fromRGB(255, 35, 35),
+    Running = Color3.fromRGB(43, 205, 151),
+    Melee = Color3.fromRGB(220, 85, 255),
+}
+
+local BODY_NAMES = {
+    HumanoidRootPart = true,
+    Head = true,
+
+    UpperTorso = true,
+    LowerTorso = true,
+    Torso = true,
+
+    LeftUpperArm = true,
+    LeftLowerArm = true,
+    LeftHand = true,
+
+    RightUpperArm = true,
+    RightLowerArm = true,
+    RightHand = true,
+
+    LeftUpperLeg = true,
+    LeftLowerLeg = true,
+    LeftFoot = true,
+
+    RightUpperLeg = true,
+    RightLowerLeg = true,
+    RightFoot = true,
+
+    ["Left Arm"] = true,
+    ["Right Arm"] = true,
+    ["Left Leg"] = true,
+    ["Right Leg"] = true,
+}
+
+-- Demonic Overgrowth uses these two replicated attack containers. The long-line
+-- template exposes a huge precast + hitBox, while overgrowthSpikes exposes a
+-- large hitBox and visible spike mesh telegraph. Explicit container recognition
+-- makes UIW catch them even when normal name-only discovery misses spawn order.
+-- Dungeon Quest melee / close-range threat database.
+-- Exact names are preferred over brittle keyword matching.
+local MELEE_ENEMY_NAMES = {
+    ["striker bot"] = true,
+
+    ["sand peasant"] = true,
+    ["sandstone soldier"] = true,
+    ["enraged sandstone soldier"] = true,
+    ["sand warlock"] = true,
+
+    ["frost minion"] = true,
+    ["ice minion"] = true,
+    ["frostwalker"] = true,
+    ["frostwalker soldier"] = true,
+    ["tundra hunter"] = true,
+    ["alpha tundra hunter"] = true,
+    ["frost familiar"] = true,
+
+    ["pirate savage"] = true,
+    ["infected pirate"] = true,
+
+    ["king's guard"] = true,
+    ["hitman"] = true,
+
+    ["demon warrior"] = true,
+    ["blood minion"] = true,
+
+    ["samurai swordsman"] = true,
+
+    ["bodyguard"] = true,
+
+    ["raider"] = true,
+
+    ["fighter bot"] = true,
+
+    ["hologram assassin"] = true,
+    ["hologram warrior"] = true,
+
+    ["aggressive lava walker"] = true,
+
+    ["mushroom spearman"] = true,
+
+    ["northern warrior"] = true,
+
+    ["dracani warrior"] = true,
+
+    ["pincer warrior"] = true,
+    ["shadow imp"] = true,
+    ["shadow stalker"] = true,
+    ["yokai shogun"] = true,
+    ["fire imp"] = true,
+
+    ["corrupted warrior"] = true,
+    ["voidskitter"] = true,
+    ["eldritch reaver"] = true,
+    ["corrupted growth"] = true,
+    ["elite queensguard"] = true,
+
+    ["draugr warrior"] = true,
+}
+
+-- These are not always categorized as conventional melee, but their dangerous
+-- behavior requires them to enter / punish close range, so use melee-style spacing.
+local PROXIMITY_THREAT_NAMES = {
+    ["elite swordsman"] = true,
+    ["burly enforcer"] = true,
+    ["bomb drone"] = true,
+    ["explosive lava walker"] = true,
+    ["temple guard"] = true,
+    ["dracani knight"] = true,
+}
+
+local function normalizeEnemyName(name)
+    return string.lower(
+        tostring(name or "")
+    )
+end
+
+local function getEnemyThreatClass(enemy)
+    if not enemy
+        or not enemy.Model
+    then
+        return nil
+    end
+
+    local lower =
+        normalizeEnemyName(
+            enemy.Model.Name
+        )
+
+    if MELEE_ENEMY_NAMES[lower] then
+        return "Melee"
+    end
+
+    if PROXIMITY_THREAT_NAMES[lower] then
+        return "Proximity"
+    end
+
+    return nil
+end
+
+local SPECIAL_HAZARD_CONTAINERS = {
+    overgrowthlonglinespikes = true,
+    overgrowthspikes = true,
+
+    -- Orbital Outpost / Lord Varosh
+    thirdbosscirclehit = true,
+    thirdbosscirclehit2 = true,
+    thirdbosslifestealbeams = true,
+    thirdbosslifestealhitbox = true,
+    thirdbossrandomline = true,
+    thirdbossorbshot = true,
+    thirdbosspassiveorb = true,
+
+    -- Volcanic Chambers / Lava King
+    thirdbossdualswingline = true,
+    thirdbossspreadline = true,
+    thirdbosslavaline = true,
+    thirdbosscrescent = true,
+    thirdbossfirewall = true,
+    thirdbossflamewall = true,
+    thirdbossflamewallhitbox = true,
+
+    -- Enchanted Forest mobs / bosses
+    mushroomwizardshot = true,
+    poisoncircle = true,
+    battlemageorb = true,
+
+    firstbosscrystal = true,
+    firstbosscrystaldrop = true,
+    firstbossspinningrockhitbox = true,
+    enchantedfirstbossfolloworb = true,
+    golemrockclap = true,
+    golemrockthrow = true,
+    golemrockthrowsmall = true,
+
+    spiritorb = true,
+    spiritstrike = true,
+}
+
+local HAZARD_NAME_HINTS = {
+    "hitbox",
+    "hit box",
+    "damage",
+    "precast",
+    "projectile",
+    "orb",
+    "beam",
+    "laser",
+    "line",
+    "circle",
+    "slam",
+    "shot",
+    "missile",
+    "rocket",
+    "blast",
+    "explosion",
+    "strike",
+    "swing",
+    "wave",
+    "spike",
+    "geyser",
+    "flame",
+    "fire",
+    "life steal",
+    "lifesteal",
+    "stun",
+    "focus",
+    "barrage",
+    "pulse",
+    "crescent",
+    "throw",
+    "clap",
+}
+
+local function hasHazardNameHint(name)
+    local lower =
+        string.lower(
+            tostring(name or "")
+        )
+
+    for _, hint in ipairs(
+        HAZARD_NAME_HINTS
+    ) do
+        if string.find(
+            lower,
+            hint,
+            1,
+            true
+        ) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function isBossAttackContainerName(name)
+    local lower =
+        string.lower(
+            tostring(name or "")
+        )
+
+    if SPECIAL_HAZARD_CONTAINERS[lower] then
+        return true
+    end
+
+    -- Dungeon Quest commonly names boss attack clones firstBoss*, secondBoss*,
+    -- thirdBoss*, finalBoss*, bonusBoss*, etc.
+    if string.find(
+        lower,
+        "boss",
+        1,
+        true
+    ) and hasHazardNameHint(lower) then
+        return true
+    end
+
+    return false
+end
+
+local function getBroadHazardContainer(instance)
+    local current = instance
+
+    while current
+        and current ~= Workspace
+    do
+        if isBossAttackContainerName(
+            current.Name
+        ) then
+            return current
+        end
+
+        current =
+            current.Parent
+    end
+
+    return nil
+end
+
+local function getSpecialHazardContainer(instance)
+    local current = instance
+
+    while current and current ~= Workspace do
+        if SPECIAL_HAZARD_CONTAINERS[string.lower(current.Name)] then
+            return current
+        end
+        current = current.Parent
+    end
+
+    return nil
+end
+
+local SAFE_ZONE_SINGLE_CONTAINER_NAMES = {
+    thirdbosssafespot = true,
+    thirdbossmemorysafezone = true,
+}
+
+local SAFE_ZONE_MULTI_CONTAINER_NAMES = {
+    thirdbossmasssafespotcircles = true,
+}
+
+local SAFE_ZONE_NONDESTINATION_CONTAINER_NAMES = {
+    thirdbosssafespotspawns = true,
+}
+
+local SAFE_ZONE_STANDALONE_PART_NAMES = {
+    safespotcircle = true,
+}
+
+local function getNamedAncestor(
+    instance,
+    names
+)
+    local current = instance
+
+    while current
+        and current ~= Workspace
+    do
+        if names[
+            string.lower(
+                current.Name or ""
+            )
+        ] then
+            return current
+        end
+
+        current = current.Parent
+    end
+
+    return nil
+end
+
+local function getSafeZoneSingleAncestor(instance)
+    return getNamedAncestor(
+        instance,
+        SAFE_ZONE_SINGLE_CONTAINER_NAMES
+    )
+end
+
+local function getSafeZoneMultiAncestor(instance)
+    return getNamedAncestor(
+        instance,
+        SAFE_ZONE_MULTI_CONTAINER_NAMES
+    )
+end
+
+local function getSafeZoneSpawnAncestor(instance)
+    return getNamedAncestor(
+        instance,
+        SAFE_ZONE_NONDESTINATION_CONTAINER_NAMES
+    )
+end
+
+local function isStandaloneSafeZonePart(instance)
+    return instance
+        and instance:IsA("BasePart")
+        and SAFE_ZONE_STANDALONE_PART_NAMES[
+            string.lower(
+                instance.Name or ""
+            )
+        ] == true
+end
+
+local function hasEnabledSafeZoneBeam(instance)
+    if not instance then
+        return false
+    end
+
+    for _, descendant in ipairs(
+        instance:GetDescendants()
+    ) do
+        if descendant:IsA("Beam")
+            and descendant.Enabled
+        then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function isSafeZoneDestinationPart(instance)
+    if not instance
+        or not instance:IsA("BasePart")
+    then
+        return false
+    end
+
+    if isStandaloneSafeZonePart(
+        instance
+    ) then
+        return hasEnabledSafeZoneBeam(
+            instance
+        )
+    end
+
+    local single =
+        getSafeZoneSingleAncestor(
+            instance
+        )
+
+    if single then
+        return string.lower(
+            instance.Name or ""
+        ) == "precast"
+    end
+
+    local multi =
+        getSafeZoneMultiAncestor(
+            instance
+        )
+
+    if multi then
+        -- This model also contains a huge damagePrecast. Only parts named
+        -- exactly `precast` are green safe destinations.
+        return string.lower(
+            instance.Name or ""
+        ) == "precast"
+    end
+
+    return false
+end
+
+local function hasActiveMemorySafeZone()
+    local safe =
+        Workspace:FindFirstChild(
+            "thirdBossMemorySafeZone"
+        )
+
+    if not safe then
+        return false
+    end
+
+    local precast =
+        safe:FindFirstChild(
+            "precast",
+            true
+        )
+
+    return precast
+        and precast:IsA("BasePart")
+        and precast.Parent ~= nil
+        and precast.Transparency < 0.98
+end
+
+local function isManagedSafeZoneMechanicInstance(instance)
+    if not instance then
+        return false
+    end
+
+    if isStandaloneSafeZonePart(
+        instance
+    ) then
+        return true
+    end
+
+    if getSafeZoneSingleAncestor(
+        instance
+    )
+        or getSafeZoneMultiAncestor(
+            instance
+        )
+        or getSafeZoneSpawnAncestor(
+            instance
+        )
+    then
+        return true
+    end
+
+    -- MemoryDamageZone is the red companion to MemorySafeZone. While the
+    -- green safe-zone mechanic is live, the mechanic controller owns movement
+    -- and this huge zone must not fight the route through generic dodge logic.
+    local current = instance
+
+    while current
+        and current ~= Workspace
+    do
+        if string.lower(
+            current.Name or ""
+        ) == "thirdbossmemorydamagezone"
+        then
+            return hasActiveMemorySafeZone()
+        end
+
+        current = current.Parent
+    end
+
+    return false
+end
+
+local CRYSTAL_GOLEM_UTILITY_ROOT_NAMES = {
+    firstbossbuildzones = true,
+    firstbosssafezones = true,
+    firstbosssupplymodels = true,
+    firstbosscrystaldroppart = true,
+    firstbosscrystaldrop = true,
+}
+
+local function isCrystalGolemUtilityInstance(instance)
+    local current =
+        instance
+
+    while current
+        and current ~= Workspace
+    do
+        if CRYSTAL_GOLEM_UTILITY_ROOT_NAMES[
+            string.lower(
+                current.Name or ""
+            )
+        ] then
+            return true
+        end
+
+        current =
+            current.Parent
+    end
+
+    return false
+end
+
+local function isNonHazardMechanicInstance(instance)
+    return isManagedSafeZoneMechanicInstance(
+        instance
+    )
+        or isCrystalGolemUtilityInstance(
+            instance
+        )
+end
+
+
+local function getEntryAncestor(instance)
+    local current = instance
+
+    while current do
+        local lower = string.lower(current.Name or "")
+
+        if string.find(lower, "entry", 1, true) then
+            return current
+        end
+
+        if current == Workspace then
+            break
+        end
+
+        current = current.Parent
+    end
+
+    return nil
+end
+
+local function isEntryInstance(instance)
+    return getEntryAncestor(instance) ~= nil
+end
+
+local function getAncestorTool(instance)
+    local current = instance
+
+    while current
+        and current ~= Workspace
+    do
+        if current:IsA("Tool") then
+            return current
+        end
+
+        current =
+            current.Parent
+    end
+
+    return nil
+end
+
+local function isLocalPlayerOwnedInstance(instance)
+    if not instance then
+        return false
+    end
+
+    local player =
+        Players.LocalPlayer
+
+    if not player then
+        return false
+    end
+
+    local character =
+        player.Character
+
+    if character
+        and (
+            instance == character
+            or instance:IsDescendantOf(
+                character
+            )
+        )
+    then
+        return true
+    end
+
+    local backpack =
+        player:FindFirstChildOfClass(
+            "Backpack"
+        )
+
+    if backpack
+        and (
+            instance == backpack
+            or instance:IsDescendantOf(
+                backpack
+            )
+        )
+    then
+        return true
+    end
+
+    local tool =
+        getAncestorTool(
+            instance
+        )
+
+    if tool then
+        if character
+            and tool:IsDescendantOf(
+                character
+            )
+        then
+            return true
+        end
+
+        if backpack
+            and tool:IsDescendantOf(
+                backpack
+            )
+        then
+            return true
+        end
+
+        if tool.Parent
+            == player
+        then
+            return true
+        end
+    end
+
+    return false
+end
+
+local LOCAL_PLAYER_EFFECT_ROOT_NAMES = {
+    ["traiiblazings"] = true,
+
+    -- Live-confirmed local spell/effect roots. These were repeatedly seen by
+    -- the dungeon watcher during Enchanted Forest and are not enemy attacks.
+    ["piercing roots"] = true,
+    ["piercingrootshitbox"] = true,
+    ["ice crash"] = true,
+}
+
+local STATIC_DUNGEON_ROOT_NAMES = {
+    ["map"] = true,
+    ["borders"] = true,
+}
+
+local function getWorkspaceRoot(instance)
+    local current = instance
+
+    while current
+        and current.Parent
+        and current.Parent ~= Workspace
+    do
+        current = current.Parent
+    end
+
+    return current
+end
+
+local function isDetachedLocalPlayerEffect(instance)
+    local root =
+        getWorkspaceRoot(
+            instance
+        )
+
+    if not root then
+        return false
+    end
+
+    return LOCAL_PLAYER_EFFECT_ROOT_NAMES[
+        string.lower(
+            root.Name or ""
+        )
+    ] == true
+end
+
+local function isStaticDungeonGeometry(instance)
+    local root =
+        getWorkspaceRoot(
+            instance
+        )
+
+    if not root then
+        return false
+    end
+
+    return STATIC_DUNGEON_ROOT_NAMES[
+        string.lower(
+            root.Name or ""
+        )
+    ] == true
+end
+
+
+local function log(...)
+    if CONFIG.Debug then
+        print("[UIW]", ...)
+    end
+end
+
+local function safeDestroy(object)
+    if object then
+        pcall(function()
+            object:Destroy()
+        end)
+    end
+end
+
+local function flatten(v)
+    return Vector3.new(v.X, 0, v.Z)
+end
+
+local function unit(v)
+    local m = v.Magnitude
+
+    if m <= 0.001 then
+        return Vector3.zero
+    end
+
+    return v / m
+end
+
+local function rotateXZ(v, degrees)
+    local r = math.rad(degrees)
+    local c = math.cos(r)
+    local s = math.sin(r)
+
+    return Vector3.new(
+        v.X * c - v.Z * s,
+        0,
+        v.X * s + v.Z * c
+    )
+end
+
+local function directionToYaw(direction)
+    direction = unit(flatten(direction))
+
+    if direction.Magnitude <= 0 then
+        return 0
+    end
+
+    return math.atan2(-direction.X, -direction.Z)
+end
+
+local function angleDifference(a, b)
+    return math.atan2(
+        math.sin(a - b),
+        math.cos(a - b)
+    )
+end
+
+local function shortNumber(value)
+    if value >= 1e9 then
+        return string.format("%.2fB", value / 1e9)
+    elseif value >= 1e6 then
+        return string.format("%.2fM", value / 1e6)
+    elseif value >= 1e3 then
+        return string.format("%.1fK", value / 1e3)
+    end
+
+    return tostring(math.floor(value))
+end
+
+local Maid = {}
+Maid.__index = Maid
+
+function Maid.new()
+    return setmetatable({
+        Tasks = {},
+    }, Maid)
+end
+
+function Maid:Give(taskObject)
+    table.insert(self.Tasks, taskObject)
+    return taskObject
+end
+
+function Maid:Clean()
+    for _, taskObject in ipairs(self.Tasks) do
+        if typeof(taskObject) == "RBXScriptConnection" then
+            pcall(function()
+                taskObject:Disconnect()
+            end)
+
+        elseif typeof(taskObject) == "Instance" then
+            safeDestroy(taskObject)
+
+        elseif type(taskObject) == "function" then
+            pcall(taskObject)
+        end
+    end
+
+    table.clear(self.Tasks)
+end
+
+local CharacterService = {}
+CharacterService.__index = CharacterService
+
+function CharacterService.new()
+    return setmetatable({
+        Character = nil,
+        Humanoid = nil,
+        Root = nil,
+
+        BodySize = Vector3.new(4.5, 5, 2),
+        BodyOffset = Vector3.zero,
+
+        FacingAttachment = nil,
+        FacingOrientation = nil,
+
+        DesiredYaw = 0,
+        OriginalAutoRotate = true,
+    }, CharacterService)
+end
+
+function CharacterService:IsAlive()
+    return self.Character
+        and self.Character.Parent
+        and self.Humanoid
+        and self.Humanoid.Health > 0
+        and self.Root
+        and self.Root.Parent
+end
+
+function CharacterService:CalculateBodyBounds()
+    if not self.Character or not self.Root then
+        return
+    end
+
+    local rootCF = self.Root.CFrame
+
+    local minX = math.huge
+    local minY = math.huge
+    local minZ = math.huge
+
+    local maxX = -math.huge
+    local maxY = -math.huge
+    local maxZ = -math.huge
+
+    local found = false
+
+    for _, part in ipairs(self.Character:GetChildren()) do
+        if part:IsA("BasePart") and BODY_NAMES[part.Name] then
+            found = true
+
+            local half = part.Size * 0.5
+
+            for _, x in ipairs({-half.X, half.X}) do
+                for _, y in ipairs({-half.Y, half.Y}) do
+                    for _, z in ipairs({-half.Z, half.Z}) do
+                        local worldPoint =
+                            part.CFrame:PointToWorldSpace(
+                                Vector3.new(x, y, z)
+                            )
+
+                        local p =
+                            rootCF:PointToObjectSpace(
+                                worldPoint
+                            )
+
+                        minX = math.min(minX, p.X)
+                        minY = math.min(minY, p.Y)
+                        minZ = math.min(minZ, p.Z)
+
+                        maxX = math.max(maxX, p.X)
+                        maxY = math.max(maxY, p.Y)
+                        maxZ = math.max(maxZ, p.Z)
+                    end
+                end
+            end
+        end
+    end
+
+    if not found then
+        self.BodySize = Vector3.new(4.5, 5, 2)
+        self.BodyOffset = Vector3.zero
+        return
+    end
+
+    self.BodySize = Vector3.new(
+        math.max(2, maxX - minX),
+        math.max(4, maxY - minY),
+        math.max(1.4, maxZ - minZ)
+    )
+
+    self.BodyOffset = Vector3.new(
+        (minX + maxX) * 0.5,
+        (minY + maxY) * 0.5,
+        (minZ + maxZ) * 0.5
+    )
+end
+
+function CharacterService:DestroyFacing()
+    safeDestroy(self.FacingOrientation)
+    safeDestroy(self.FacingAttachment)
+
+    self.FacingOrientation = nil
+    self.FacingAttachment = nil
+end
+
+function CharacterService:SetupFacing()
+    if not self.Root or not self.Humanoid then
+        return
+    end
+
+    self:DestroyFacing()
+
+    self.OriginalAutoRotate =
+        self.Humanoid.AutoRotate
+
+    self.Humanoid.AutoRotate = false
+
+    local attachment =
+        Instance.new("Attachment")
+
+    attachment.Name =
+        "UIWFacingAttachment"
+
+    attachment.Parent =
+        self.Root
+
+    local align =
+        Instance.new("AlignOrientation")
+
+    align.Name =
+        "UIWFacing"
+
+    align.Mode =
+        Enum.OrientationAlignmentMode.OneAttachment
+
+    align.Attachment0 =
+        attachment
+
+    align.RigidityEnabled =
+        false
+
+    align.Responsiveness =
+        50
+
+    align.MaxTorque =
+        math.huge
+
+    align.Parent =
+        self.Root
+
+    self.FacingAttachment =
+        attachment
+
+    self.FacingOrientation =
+        align
+end
+
+function CharacterService:SetYaw(yaw)
+    self.DesiredYaw = yaw
+
+    if not self.FacingOrientation
+        or not self.FacingOrientation.Parent
+    then
+        self:SetupFacing()
+    end
+
+    if self.FacingOrientation then
+        self.FacingOrientation.CFrame =
+            CFrame.Angles(
+                0,
+                yaw,
+                0
+            )
+    end
+end
+
+function CharacterService:FacePosition(position)
+    if not self:IsAlive() then
+        return
+    end
+
+    local direction =
+        flatten(
+            position - self.Root.Position
+        )
+
+    if direction.Magnitude <= 0.05 then
+        return
+    end
+
+    self:SetYaw(
+        directionToYaw(direction)
+    )
+end
+
+function CharacterService:Refresh()
+    local character =
+        LocalPlayer.Character
+
+    if not character then
+        return false
+    end
+
+    local humanoid =
+        character:FindFirstChildOfClass(
+            "Humanoid"
+        )
+
+    local root =
+        character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    if not humanoid
+        or not root
+    then
+        return false
+    end
+
+    local changed =
+        character ~= self.Character
+
+    self.Character =
+        character
+
+    self.Humanoid =
+        humanoid
+
+    self.Root =
+        root
+
+    humanoid.WalkSpeed =
+        CONFIG.WalkSpeed
+
+    if changed then
+        self:CalculateBodyBounds()
+        self:SetupFacing()
+    end
+
+    return true
+end
+
+function CharacterService:Destroy()
+    if self.Humanoid then
+        pcall(function()
+            self.Humanoid.AutoRotate =
+                self.OriginalAutoRotate
+        end)
+    end
+
+    self:DestroyFacing()
+end
+
+local SelfAbilityTracker = {}
+SelfAbilityTracker.__index = SelfAbilityTracker
+
+function SelfAbilityTracker.new()
+    return setmetatable({
+        Ignore =
+            setmetatable({}, {
+                __mode = "k",
+            }),
+
+        LastLocalCast = {},
+        Maid = Maid.new(),
+    }, SelfAbilityTracker)
+end
+
+function SelfAbilityTracker:RegisterCast(slot)
+    self.LastLocalCast[slot] =
+        os.clock()
+end
+
+function SelfAbilityTracker:MarkOwn(instance)
+    if instance then
+        self.Ignore[instance] =
+            true
+    end
+end
+
+function SelfAbilityTracker:IsOwn(instance)
+    if not instance then
+        return false
+    end
+
+    if self.Ignore[instance] then
+        return true
+    end
+
+    local current =
+        instance
+
+    while current
+        and current ~= Workspace
+    do
+        if self.Ignore[current] then
+            return true
+        end
+
+        current =
+            current.Parent
+    end
+
+    return false
+end
+
+function SelfAbilityTracker:Start()
+    self.Maid:Give(
+        Workspace.ChildAdded:Connect(
+            function(child)
+                if child.Name
+                    ~= "genericNeonBall"
+                then
+                    return
+                end
+
+                local castTime =
+                    self.LastLocalCast.e
+
+                if not castTime then
+                    return
+                end
+
+                local age =
+                    os.clock() - castTime
+
+                if age >= 0
+                    and age <= 1.65
+                then
+                    self:MarkOwn(
+                        child
+                    )
+                end
+            end
+        )
+    )
+end
+
+function SelfAbilityTracker:Destroy()
+    self.Maid:Clean()
+end
+
+local HazardTracker = {}
+HazardTracker.__index = HazardTracker
+
+function HazardTracker.new(
+    characterService,
+    selfTracker
+)
+    local overlapParams =
+        OverlapParams.new()
+
+    overlapParams.FilterType =
+        Enum.RaycastFilterType.Include
+
+    return setmetatable({
+        CharacterService =
+            characterService,
+
+        SelfTracker =
+            selfTracker,
+
+        Hazards =
+            setmetatable({}, {
+                __mode = "k",
+            }),
+
+        ContainerState =
+            setmetatable({}, {
+                __mode = "k",
+            }),
+
+        CachedActive =
+            {},
+
+        CachedParts =
+            {},
+
+        LastCacheTime =
+            0,
+
+        LastBroadSweep =
+            0,
+
+        OverlapParams =
+            overlapParams,
+
+        Maid =
+            Maid.new(),
+    }, HazardTracker)
+end
+
+function HazardTracker:GetContainer(part)
+    if part
+        and (
+            isLocalPlayerOwnedInstance(
+                part
+            )
+            or isDetachedLocalPlayerEffect(
+                part
+            )
+        )
+    then
+        return nil
+    end
+
+    local broad =
+        part
+        and getBroadHazardContainer(
+            part
+        )
+
+    if broad then
+        return broad
+    end
+
+    local special =
+        part
+        and getSpecialHazardContainer(
+            part
+        )
+
+    if special then
+        return special
+    end
+
+    local parent =
+        part
+        and part.Parent
+
+    if parent
+        and parent ~= Workspace
+    then
+        return parent
+    end
+
+    return part
+end
+
+
+function HazardTracker:IsPrecastPart(part)
+    if not part or not part:IsA("BasePart") then return false end
+    local ownName = string.lower(part.Name)
+    if string.find(ownName,"hitbox",1,true) and not string.find(ownName,"precast",1,true) then
+        return false
+    end
+    local current = part
+    for _ = 1, 3 do
+        if not current or current == Workspace then break end
+        local name = string.lower(current.Name)
+        if string.find(name, "precast", 1, true)
+            or string.find(name, "telegraph", 1, true) then return true end
+        current = current.Parent
+    end
+    return false
+end
+
+function HazardTracker:IsWarningVisible(part)
+    if not part or not part.Parent then return false end
+    if part.Transparency < 0.98 and part.LocalTransparencyModifier < 0.98 then return true end
+    for _, visual in ipairs(part:GetDescendants()) do
+        if (visual:IsA("Decal") or visual:IsA("Texture")) and visual.Transparency < 0.98 then
+            return true
+        elseif (visual:IsA("ParticleEmitter") or visual:IsA("Beam") or visual:IsA("Trail"))
+            and visual.Enabled then return true
+        elseif visual:IsA("SurfaceGui") and visual.Enabled then return true end
+    end
+    return false
+end
+
+function HazardTracker:UpdateWarningBounds(data)
+    local part = data.Part
+    local size = part.Size
+    local original = part:GetAttribute("OriginalSize")
+    if typeof(original) ~= "Vector3" then
+        local value = part:FindFirstChild("OriginalSize")
+        original = value and value:IsA("Vector3Value") and value.Value or nil
+    end
+    if typeof(original) == "Vector3" and original.X > 0 and original.Y > 0 and original.Z > 0
+        and math.max(original.X,original.Y,original.Z) <= 1024 then
+        size = Vector3.new(math.max(size.X,original.X),math.max(size.Y,original.Y),math.max(size.Z,original.Z))
+    end
+    local cf = part.CFrame
+    local axes = {cf.RightVector,cf.UpVector,cf.LookVector}
+    local dims = {size.X,size.Y,size.Z}
+    local vertical = 1
+    for i = 2, 3 do
+        if math.abs(axes[i].Y) > math.abs(axes[vertical].Y) then vertical = i end
+    end
+    local worldHeight = math.abs(axes[1].Y)*size.X + math.abs(axes[2].Y)*size.Y
+        + math.abs(axes[3].Y)*size.Z
+    -- Lift thin floor warnings into a body-height danger column. This is math
+    -- only: do not resize the actual warning or change its collision settings.
+    if worldHeight <= CONFIG.PrecastThinHeight and math.abs(axes[vertical].Y) > 0.9 then
+        dims[vertical] += CONFIG.PrecastColumnHeight / math.abs(axes[vertical].Y)
+        cf += Vector3.new(0, CONFIG.PrecastColumnHeight * 0.5, 0)
+    end
+    data.WarningCF = cf
+    data.WarningHalf = Vector3.new(dims[1],dims[2],dims[3])*0.5
+end
+
+function HazardTracker:IsBodyInWarning(position, yaw, data)
+    if not data.WarningCF then self:UpdateWarningBounds(data) end
+    local cf, half = data.WarningCF, data.WarningHalf
+    local bodyCF, bodyHalf = self:GetBodyCF(position,yaw), self:GetBodySize()*0.5
+    local point = cf:PointToObjectSpace(bodyCF.Position)
+    local function radius(axis)
+        return math.abs(axis:Dot(bodyCF.RightVector))*bodyHalf.X
+            + math.abs(axis:Dot(bodyCF.UpVector))*bodyHalf.Y
+            + math.abs(axis:Dot(bodyCF.LookVector))*bodyHalf.Z
+    end
+    local padding = CONFIG.PrecastSafetyPadding
+    return math.abs(point.X) <= half.X + radius(cf.RightVector) + padding
+        and math.abs(point.Y) <= half.Y + radius(cf.UpVector) + padding
+        and math.abs(point.Z) <= half.Z + radius(cf.LookVector) + padding
+end
+
+function HazardTracker:IsPrecastTrajectoryClear(position, direction, yaw, distance)
+    self:RefreshCache(false)
+    direction = unit(flatten(direction))
+    for _, data in ipairs(self.CachedWarnings or {}) do
+        local count = math.max(1,math.ceil(distance / 2))
+        for i = 0, count do
+            if self:IsBodyInWarning(position + direction * (distance * i / count),yaw,data) then
+                return false
+            end
+        end
+    end
+    return true
+end
+
+function HazardTracker:GetWarningExitDirection(part, position)
+    local data = self.Hazards[part]
+    if not data or not data.IsPrecast then return nil end
+    if not data.WarningCF then self:UpdateWarningBounds(data) end
+    local cf,half=data.WarningCF,data.WarningHalf
+    local point=cf:PointToObjectSpace(position)
+    -- Local Z uses -LookVector. Skip the vertical cylinder axis entirely.
+    local axes={cf.RightVector,cf.UpVector,-cf.LookVector}
+    local coordinates={point.X,point.Y,point.Z}
+    local extents={half.X,half.Y,half.Z}
+    local best, distance=nil,math.huge
+    for i,axis in ipairs(axes) do
+        if math.abs(axis.Y)<0.5 then
+            local exit=extents[i]-math.abs(coordinates[i])
+            if exit<distance then
+                best=unit(flatten(axis))*(coordinates[i]>=0 and 1 or -1)
+                distance=exit
+            end
+        end
+    end
+    return best
+end
+
+function HazardTracker:ScanContainerVisualState(container)
+    if not container or not container.Parent then return false end
+    local function visible(object)
+        if object:IsA("BasePart") then
+            return object.Transparency < 0.98 and object.LocalTransparencyModifier < 0.98
+        elseif object:IsA("Decal") or object:IsA("Texture") then
+            return object.Transparency < 0.98
+        elseif object:IsA("ParticleEmitter") or object:IsA("Beam") or object:IsA("Trail") then
+            return object.Enabled
+        elseif object:IsA("SurfaceGui") then return object.Enabled end
+        return false
+    end
+    if visible(container) then return true end
+    for _, object in ipairs(container:GetDescendants()) do
+        if visible(object) then return true end
+    end
+    return false
+end
+
+function HazardTracker:IsContainerActive(container, now)
+    now = now or os.clock()
+
+    if not container or not container.Parent then
+        self.ContainerState[container] = nil
+        return false
+    end
+
+    local state = self.ContainerState[container]
+    if not state then
+        state = {
+            LastScan = -math.huge,
+            RawActive = false,
+            RawSince = now,
+            Active = true,
+            FirstSeen = now,
+        }
+        self.ContainerState[container] = state
+    end
+
+    if now - state.LastScan >= CONFIG.HazardVisualScanInterval then
+        state.LastScan = now
+
+        local raw = self:ScanContainerVisualState(container)
+
+        if raw ~= state.RawActive then
+            state.RawActive = raw
+            state.RawSince = now
+        end
+    end
+
+    if state.RawActive then
+        state.Active = true
+        return true
+    end
+
+    if now - state.FirstSeen <= CONFIG.HazardSpawnGrace then
+        state.Active = true
+        return true
+    end
+
+    if state.Active
+        and now - state.RawSince < CONFIG.HazardInactiveGrace
+    then
+        return true
+    end
+
+    state.Active = false
+    return false
+end
+
+function HazardTracker:IsPartActive(part, now)
+    if not part
+        or not part.Parent
+        or isEntryInstance(part)
+        or isNonHazardMechanicInstance(part)
+        or isLocalPlayerOwnedInstance(part)
+        or isDetachedLocalPlayerEffect(part)
+        or self.SelfTracker:IsOwn(part)
+    then
+        return false
+    end
+
+    -- Generic-name scanning must never turn permanent map/border geometry into
+    -- hazards. Exact hitbox/precast parts and explicit boss attack containers
+    -- are still allowed through.
+    if isStaticDungeonGeometry(part)
+        and not getBroadHazardContainer(part)
+    then
+        local lower =
+            string.lower(
+                part.Name or ""
+            )
+
+        local exactAttackPart =
+            self:IsPrecastPart(part) or lower == "hitbox"
+            or lower == "hitboxpart"
+            or lower == "precast"
+            or string.find(
+                lower,
+                "hitbox",
+                1,
+                true
+            ) ~= nil
+            or string.find(
+                lower,
+                "precast",
+                1,
+                true
+            ) ~= nil
+
+        if not exactAttackPart then
+            return false
+        end
+    end
+
+    local data = self.Hazards[part]
+    if not data then
+        return false
+    end
+
+    local container = data.Container or self:GetContainer(part)
+    data.Container = container
+
+    if self:IsPrecastPart(part) then return self:IsWarningVisible(part) end
+    return self:IsContainerActive(container, now)
+end
+
+function HazardTracker:IsHazardPart(part)
+    if not part:IsA("BasePart") then
+        return false
+    end
+
+    if isEntryInstance(part)
+        or isNonHazardMechanicInstance(
+            part
+        )
+    then
+        return false
+    end
+
+    if isLocalPlayerOwnedInstance(
+        part
+    )
+        or isDetachedLocalPlayerEffect(
+            part
+        )
+    then
+        return false
+    end
+
+    if self.SelfTracker:IsOwn(part) then
+        return false
+    end
+
+    if self:IsPrecastPart(part) then return true end
+
+    local lower =
+        string.lower(
+            part.Name
+        )
+
+    -- Exact Dungeon Quest attack conventions are authoritative.
+    if lower == "hitbox"
+        or lower == "hitboxpart"
+        or lower == "precast"
+        or string.find(
+            lower,
+            "hitbox",
+            1,
+            true
+        )
+        or string.find(
+            lower,
+            "precast",
+            1,
+            true
+        )
+    then
+        return true
+    end
+
+    local broadContainer =
+        getBroadHazardContainer(
+            part
+        )
+
+    -- Explicit boss-attack containers are authoritative too.
+    if broadContainer
+        and (
+            part.CanQuery
+            or part.CanTouch
+        )
+    then
+        return true
+    end
+
+    -- Confirmed live false positives in Volcanic Chambers:
+    -- Workspace.Map.Broken spike
+    -- Workspace.Map.Claw spike
+    -- Permanent map/border geometry must not be classified from broad words
+    -- like "spike", "fire", "rock", "line", etc.
+    if isStaticDungeonGeometry(
+        part
+    ) then
+        return false
+    end
+
+    local hinted =
+        hasHazardNameHint(
+            lower
+        )
+
+    if hinted
+        and (
+            part.CanQuery
+            or part.CanTouch
+        )
+    then
+        if part.Transparency
+            < 0.98
+        then
+            return true
+        end
+
+        local maxAxis =
+            math.max(
+                part.Size.X,
+                part.Size.Y,
+                part.Size.Z
+            )
+
+        local volume =
+            part.Size.X
+            * part.Size.Y
+            * part.Size.Z
+
+        if maxAxis >= 3
+            and volume >= 8
+        then
+            return true
+        end
+    end
+
+    local special =
+        getSpecialHazardContainer(
+            part
+        )
+
+    if special
+        and part.CanQuery
+    then
+        local maxPlanar =
+            math.max(
+                part.Size.X,
+                part.Size.Z
+            )
+
+        local footprint =
+            part.Size.X
+            * part.Size.Z
+
+        if part.Transparency >= 0.80
+            and maxPlanar >= 8
+            and footprint >= 100
+        then
+            return true
+        end
+    end
+
+    return false
+end
+
+function HazardTracker:RegisterAttackContainer(
+    container
+)
+    if not container
+        or not container.Parent
+        or isLocalPlayerOwnedInstance(
+            container
+        )
+        or isDetachedLocalPlayerEffect(
+            container
+        )
+        or isNonHazardMechanicInstance(
+            container
+        )
+    then
+        return
+    end
+
+    for _, descendant in ipairs(
+        container:GetDescendants()
+    ) do
+        if descendant:IsA("BasePart")
+            and self:IsHazardPart(
+                descendant
+            )
+        then
+            self:Register(
+                descendant
+            )
+        end
+    end
+
+    if container:IsA("BasePart")
+        and self:IsHazardPart(
+            container
+        )
+    then
+        self:Register(
+            container
+        )
+    end
+end
+
+function HazardTracker:BroadSweep()
+    local now =
+        os.clock()
+
+    if now
+        - self.LastBroadSweep
+        < CONFIG.BroadHazardSweepInterval
+    then
+        return
+    end
+
+    self.LastBroadSweep =
+        now
+
+    local root =
+        self.CharacterService.Root
+
+    local rootPosition =
+        root
+        and root.Position
+
+    for _, child in ipairs(
+        Workspace:GetChildren()
+    ) do
+        if isLocalPlayerOwnedInstance(
+            child
+        )
+            or isDetachedLocalPlayerEffect(
+                child
+            )
+            or isNonHazardMechanicInstance(
+                child
+            )
+        then
+            continue
+        end
+
+        if child:IsA("BasePart") then
+            if (
+                not rootPosition
+                or (
+                    child.Position
+                    - rootPosition
+                ).Magnitude
+                    <= CONFIG.BroadHazardSweepRadius
+            )
+                and self:IsHazardPart(
+                    child
+                )
+            then
+                self:Register(
+                    child
+                )
+            end
+
+        elseif (
+            child:IsA("Model")
+            or child:IsA("Folder")
+        )
+            and (
+                isBossAttackContainerName(
+                    child.Name
+                )
+                or hasHazardNameHint(
+                    child.Name
+                )
+            )
+        then
+            self:RegisterAttackContainer(
+                child
+            )
+        end
+    end
+end
+
+function HazardTracker:RegisterSpecialContainer(container)
+    if not container
+        or not container.Parent
+        or isLocalPlayerOwnedInstance(
+            container
+        )
+        or isDetachedLocalPlayerEffect(
+            container
+        )
+        or isNonHazardMechanicInstance(
+            container
+        )
+    then
+        return
+    end
+
+    if not SPECIAL_HAZARD_CONTAINERS[string.lower(container.Name)] then
+        return
+    end
+
+    for _, descendant in ipairs(container:GetDescendants()) do
+        if descendant:IsA("BasePart") and self:IsHazardPart(descendant) then
+            self:Register(descendant)
+        end
+    end
+end
+
+function HazardTracker:Register(part)
+    if self.Hazards[part] then
+        return
+    end
+
+    if not self:IsHazardPart(part) then
+        return
+    end
+
+    local now = os.clock()
+    local container = self:GetContainer(part)
+
+    self.Hazards[part] = {
+        Part = part,
+
+        Name =
+            part.Parent
+            and part.Parent.Name
+            or part.Name,
+
+        Container = container,
+        IsPrecast = self:IsPrecastPart(part),
+        BornAt = now,
+
+        -- Motion sampling for Anchored+CFrame projectiles.
+        LastMotionPosition = part.Position,
+        LastMotionTime = now,
+        EstimatedVelocity = Vector3.zero,
+        MotionSamples = 0,
+    }
+
+    -- A container may be assembled over several scheduler slices. FirstSeen is
+    -- intentionally anchored to the first hazard child so invisible damage parts
+    -- get only a short grace, not an indefinite lifetime.
+    if container and not self.ContainerState[container] then
+        self.ContainerState[container] = {
+            LastScan = -math.huge,
+            RawActive = false,
+            RawSince = now,
+            Active = true,
+            FirstSeen = now,
+        }
+    end
+
+    self.LastCacheTime =
+        0
+end
+
+function HazardTracker:Unregister(part)
+    if self.Hazards[part] then
+        self.Hazards[part] =
+            nil
+
+        self.LastCacheTime =
+            0
+    end
+end
+
+function HazardTracker:Start()
+    -- Full initial pass with the broader classifier.
+    for _, descendant in ipairs(
+        Workspace:GetDescendants()
+    ) do
+        if descendant:IsA("BasePart")
+            and not isNonHazardMechanicInstance(
+                descendant
+            )
+            and not isLocalPlayerOwnedInstance(
+                descendant
+            )
+            and not isDetachedLocalPlayerEffect(
+                descendant
+            )
+        then
+            self:Register(
+                descendant
+            )
+        end
+    end
+
+    self:BroadSweep()
+
+    self.Maid:Give(
+        Workspace.DescendantAdded:
+        Connect(function(instance)
+            if instance:IsA("BasePart") then
+                for _, delayTime in ipairs({0.03,0.12}) do
+                    task.delay(delayTime,function()
+                        if instance.Parent then self:Register(instance) end
+                    end)
+                end
+                task.defer(function()
+                    if not instance.Parent
+                        or isNonHazardMechanicInstance(
+                            instance
+                        )
+                        or isLocalPlayerOwnedInstance(
+                            instance
+                        )
+                        or isDetachedLocalPlayerEffect(
+                            instance
+                        )
+                    then
+                        return
+                    end
+
+                    self:Register(
+                        instance
+                    )
+
+                    local broad =
+                        getBroadHazardContainer(
+                            instance
+                        )
+
+                    if broad then
+                        self:
+                        RegisterAttackContainer(
+                            broad
+                        )
+                    end
+
+                    local special =
+                        getSpecialHazardContainer(
+                            instance
+                        )
+
+                    if special then
+                        self:
+                        RegisterSpecialContainer(
+                            special
+                        )
+                    end
+                end)
+
+            elseif instance:IsA("Model")
+                or instance:IsA("Folder")
+            then
+                if isBossAttackContainerName(
+                    instance.Name
+                )
+                    or hasHazardNameHint(
+                        instance.Name
+                    )
+                then
+                    -- Cloned attack models can populate children over several
+                    -- scheduler slices; scan repeatedly so no hidden Part child
+                    -- is missed because of creation order.
+                    task.defer(function()
+                        if instance.Parent then
+                            self:
+                            RegisterAttackContainer(
+                                instance
+                            )
+                        end
+                    end)
+
+                    task.delay(
+                        0.03,
+                        function()
+                            if instance.Parent then
+                                self:
+                                RegisterAttackContainer(
+                                    instance
+                                )
+                            end
+                        end
+                    )
+
+                    task.delay(
+                        0.10,
+                        function()
+                            if instance.Parent then
+                                self:
+                                RegisterAttackContainer(
+                                    instance
+                                )
+                            end
+                        end
+                    )
+
+                    task.delay(
+                        0.25,
+                        function()
+                            if instance.Parent then
+                                self:
+                                RegisterAttackContainer(
+                                    instance
+                                )
+                            end
+                        end
+                    )
+                end
+            end
+        end)
+    )
+
+    self.Maid:Give(
+        Workspace.DescendantRemoving:
+        Connect(function(instance)
+            self:Unregister(
+                instance
+            )
+        end)
+    )
+
+    -- Cheap top-level recovery sweep. This covers attack clones that were
+    -- reparented/renamed in a way that did not match during DescendantAdded.
+    self.Maid:Give(
+        RunService.Heartbeat:
+        Connect(function()
+            self:BroadSweep()
+        end)
+    )
+end
+
+function HazardTracker:IsPredictiveProjectile(
+    data
+)
+    if not data
+        or not data.Part
+        or not data.Part.Parent
+    then
+        return false
+    end
+
+    local partName =
+        string.lower(
+            data.Part.Name or ""
+        )
+
+    -- Live-confirmed anchored/CFrame projectiles.
+    if partName == "thirdbossorbshot"
+        or partName == "battlemageorb"
+        or partName == "spiritorb"
+    then
+        return true
+    end
+
+    local container =
+        data.Container
+        or getBroadHazardContainer(
+            data.Part
+        )
+        or getSpecialHazardContainer(
+            data.Part
+        )
+
+    local containerName =
+        container
+        and string.lower(
+            container.Name or ""
+        )
+        or ""
+
+    return containerName
+            == "thirdbosscrescent"
+        or containerName
+            == "thirdbossfirewall"
+        or containerName
+            == "thirdbossflamewallhitbox"
+        or containerName
+            == "battlemageorb"
+        or containerName
+            == "spiritorb"
+        or containerName
+            == "golemrockthrow"
+        or containerName
+            == "golemrockthrowsmall"
+        or containerName
+            == "enchantedfirstbossfolloworb"
+end
+
+function HazardTracker:UpdateMotionSample(
+    data,
+    now
+)
+    local part =
+        data
+        and data.Part
+
+    if not part
+        or not part.Parent
+    then
+        return
+    end
+
+    local position =
+        part.Position
+
+    local lastPosition =
+        data.LastMotionPosition
+        or position
+
+    local lastTime =
+        data.LastMotionTime
+        or now
+
+    local dt =
+        now - lastTime
+
+    if dt >= 0.018 then
+        local rawVelocity =
+            (
+                position
+                - lastPosition
+            ) / dt
+
+        if rawVelocity.Magnitude
+            >= CONFIG.ProjectileVelocityMin
+        then
+            if (data.MotionSamples or 0) > 0
+                and data.EstimatedVelocity
+            then
+                data.EstimatedVelocity =
+                    data.EstimatedVelocity:
+                    Lerp(
+                        rawVelocity,
+                        CONFIG.ProjectileVelocitySmoothing
+                    )
+            else
+                data.EstimatedVelocity =
+                    rawVelocity
+            end
+
+            data.MotionSamples =
+                (data.MotionSamples or 0)
+                + 1
+        end
+
+        data.LastMotionPosition =
+            position
+
+        data.LastMotionTime =
+            now
+    end
+end
+
+function HazardTracker:GetProjectileVelocity(
+    data
+)
+    if not data
+        or not data.Part
+        or not data.Part.Parent
+    then
+        return Vector3.zero
+    end
+
+    local estimated =
+        data.EstimatedVelocity
+        or Vector3.zero
+
+    if estimated.Magnitude
+        >= CONFIG.ProjectileVelocityMin
+    then
+        return estimated
+    end
+
+    local assembly =
+        data.Part.AssemblyLinearVelocity
+
+    if assembly.Magnitude
+        >= CONFIG.ProjectileVelocityMin
+    then
+        return assembly
+    end
+
+    return Vector3.zero
+end
+
+function HazardTracker:IsProjectedBodyInsidePart(
+    rootPosition,
+    yaw,
+    part,
+    projectedPartCF
+)
+    local bodyCF =
+        self:GetBodyCF(
+            rootPosition,
+            yaw
+        )
+
+    local localPoint =
+        projectedPartCF:
+        PointToObjectSpace(
+            bodyCF.Position
+        )
+
+    local body =
+        self:GetBodySize()
+
+    local half =
+        part.Size * 0.5
+
+    half +=
+        body * 0.5
+
+    half +=
+        Vector3.new(
+            CONFIG.ProjectileExtraPaddingXZ,
+            CONFIG.ProjectileExtraPaddingY,
+            CONFIG.ProjectileExtraPaddingXZ
+        )
+
+    return math.abs(localPoint.X)
+            <= half.X
+        and math.abs(localPoint.Y)
+            <= half.Y
+        and math.abs(localPoint.Z)
+            <= half.Z
+end
+
+function HazardTracker:GetIncomingProjectileThreat(
+    startPosition,
+    playerDirection,
+    yaw,
+    moveDistance
+)
+    self:RefreshCache(false)
+
+    playerDirection =
+        unit(
+            flatten(
+                playerDirection
+                or Vector3.zero
+            )
+        )
+
+    moveDistance =
+        math.max(
+            moveDistance or 0,
+            0
+        )
+
+    local humanoid =
+        self.CharacterService.Humanoid
+
+    local playerSpeed =
+        humanoid
+        and humanoid.WalkSpeed
+        or 20
+
+    local bestData =
+        nil
+
+    local bestTime =
+        math.huge
+
+    for _, data in ipairs(
+        self.CachedActive
+    ) do
+        if self:IsPredictiveProjectile(
+            data
+        )
+        then
+            local part =
+                data.Part
+
+            local velocity =
+                self:GetProjectileVelocity(
+                    data
+                )
+
+            if velocity.Magnitude
+                >= CONFIG.ProjectileVelocityMin
+            then
+                local rotation =
+                    part.CFrame.Rotation
+
+                local time =
+                    0
+
+                while time
+                    <= CONFIG.ProjectilePredictionHorizon
+                do
+                    local moveAmount =
+                        math.min(
+                            moveDistance,
+                            playerSpeed * time
+                        )
+
+                    local playerPosition =
+                        startPosition
+                        + playerDirection
+                            * moveAmount
+
+                    local projectilePosition =
+                        part.Position
+                        + velocity * time
+
+                    local projectedCF =
+                        CFrame.new(
+                            projectilePosition
+                        )
+                        * rotation
+
+                    if self:
+                        IsProjectedBodyInsidePart(
+                            playerPosition,
+                            yaw,
+                            part,
+                            projectedCF
+                        )
+                    then
+                        if time < bestTime then
+                            bestData =
+                                data
+
+                            bestTime =
+                                time
+                        end
+
+                        break
+                    end
+
+                    time +=
+                        CONFIG.ProjectilePredictionStep
+                end
+            end
+        end
+    end
+
+    return bestData,
+        bestTime
+end
+
+function HazardTracker:IsPredictiveTrajectoryClear(
+    startPosition,
+    playerDirection,
+    yaw,
+    moveDistance
+)
+    local data =
+        self:GetIncomingProjectileThreat(
+            startPosition,
+            playerDirection,
+            yaw,
+            moveDistance
+        )
+
+    return data == nil
+end
+
+function HazardTracker:RefreshCache(force)
+    local now =
+        os.clock()
+
+    if not force
+        and now - self.LastCacheTime
+        < CONFIG.HazardCacheInterval
+    then
+        return
+    end
+
+    self.LastCacheTime =
+        now
+
+    table.clear(
+        self.CachedActive
+    )
+
+    table.clear(
+        self.CachedParts
+    )
+
+    local root =
+        self.CharacterService.Root
+
+    local rootPosition =
+        root and root.Position
+
+    self.CachedWarnings = self.CachedWarnings or {}
+    table.clear(self.CachedWarnings)
+    local containerActive = {}
+
+    for part, data in pairs(
+        self.Hazards
+    ) do
+        if part
+            and part.Parent
+            and not isEntryInstance(part)
+            and not isNonHazardMechanicInstance(
+                part
+            )
+            and not isLocalPlayerOwnedInstance(
+                part
+            )
+            and not isDetachedLocalPlayerEffect(
+                part
+            )
+            and not self.SelfTracker:IsOwn(part)
+        then
+            if isStaticDungeonGeometry(
+                part
+            )
+                and not getBroadHazardContainer(
+                    part
+                )
+            then
+                local lower =
+                    string.lower(
+                        part.Name or ""
+                    )
+
+                local exactAttackPart =
+                    self:IsPrecastPart(part) or lower == "hitbox"
+                    or lower == "hitboxpart"
+                    or lower == "precast"
+                    or string.find(
+                        lower,
+                        "hitbox",
+                        1,
+                        true
+                    ) ~= nil
+                    or string.find(
+                        lower,
+                        "precast",
+                        1,
+                        true
+                    ) ~= nil
+
+                if not exactAttackPart then
+                    self.Hazards[part] =
+                        nil
+
+                    continue
+                end
+            end
+            if self:IsPredictiveProjectile(
+                data
+            )
+            then
+                self:UpdateMotionSample(
+                    data,
+                    now
+                )
+            end
+
+            local container = data.Container or self:GetContainer(part)
+            data.Container = container
+
+            data.IsPrecast = self:IsPrecastPart(part)
+            local active
+            if data.IsPrecast then
+                active = self:IsWarningVisible(part)
+                self:UpdateWarningBounds(data)
+            else
+                active = containerActive[container]
+            end
+            if not data.IsPrecast and active == nil then
+                active = self:IsContainerActive(container, now)
+                containerActive[container] = active
+            end
+
+            if active
+                and (
+                    not rootPosition
+                    or (
+                        part.Position
+                        - rootPosition
+                    ).Magnitude
+                    < 180 + (data.WarningHalf and data.WarningHalf.Magnitude or part.Size.Magnitude * 0.5)
+                )
+            then
+                if data.IsPrecast then table.insert(self.CachedWarnings,data) end
+                table.insert(
+                    self.CachedActive,
+                    data
+                )
+
+                table.insert(
+                    self.CachedParts,
+                    part
+                )
+            end
+        else
+            self.Hazards[part] =
+                nil
+        end
+    end
+
+    self.OverlapParams.FilterDescendantsInstances =
+        self.CachedParts
+end
+
+function HazardTracker:GetActive()
+    self:RefreshCache(false)
+    return self.CachedActive
+end
+
+function HazardTracker:GetBodySize()
+    local body =
+        self.CharacterService.BodySize
+
+    return Vector3.new(
+        body.X
+            + CONFIG.BodyPaddingXZ * 2,
+
+        body.Y
+            + CONFIG.BodyPaddingY * 2,
+
+        body.Z
+            + CONFIG.BodyPaddingXZ * 2
+    )
+end
+
+function HazardTracker:GetBodyCF(
+    position,
+    yaw
+)
+    return CFrame.new(position)
+        * CFrame.Angles(
+            0,
+            yaw,
+            0
+        )
+        * CFrame.new(
+            self.CharacterService
+                .BodyOffset
+        )
+end
+
+function HazardTracker:GetBodyOverlaps(position, yaw)
+    self:RefreshCache(false)
+    local parts, seen = {}, {}
+    if #self.CachedParts > 0 then
+        local ok, hits = pcall(function()
+            return Workspace:GetPartBoundsInBox(self:GetBodyCF(position,yaw),self:GetBodySize(),self.OverlapParams)
+        end)
+        if ok then
+            for _, part in ipairs(hits) do parts[#parts+1]=part; seen[part]=true end
+        end
+    end
+    -- Query-disabled and paper-thin warning parts need explicit volume tests.
+    for _, data in ipairs(self.CachedWarnings or {}) do
+        if not seen[data.Part] and self:IsBodyInWarning(position,yaw,data) then
+            parts[#parts+1]=data.Part
+            seen[data.Part]=true
+        end
+    end
+    return parts
+end
+
+function HazardTracker:IsFullBodyClear(
+    position,
+    yaw
+)
+    return #self:GetBodyOverlaps(
+        position,
+        yaw
+    ) == 0
+end
+
+function HazardTracker:IsTrajectoryClear(
+    startPosition,
+    direction,
+    yaw,
+    distance
+)
+    direction =
+        unit(flatten(direction))
+
+    if direction.Magnitude <= 0 then
+        return false
+    end
+
+    distance = math.max(distance or 0, 0)
+
+    -- Four/five body probes are enough for the short 6-10 stud movement windows
+    -- UIW evaluates. The old implementation could issue eight overlapping
+    -- GetPartBoundsInBox calls per candidate, then repeat that hundreds of times
+    -- during emergency escape.
+    local step = 2.25
+    local sample = 0
+
+    while sample < distance do
+        local p =
+            startPosition
+            + direction * sample
+
+        if not self:IsFullBodyClear(
+            p,
+            yaw
+        ) then
+            return false
+        end
+
+        sample += step
+    end
+
+    return self:IsFullBodyClear(
+        startPosition + direction * distance,
+        yaw
+    )
+end
+
+function HazardTracker:GetPointThreatFromActive(
+    position,
+    active
+)
+    local score = 0
+
+    for _, hazard in ipairs(active) do
+        local part = hazard.Part
+
+        if part and part.Parent then
+            local localPoint =
+                part.CFrame:
+                PointToObjectSpace(
+                    position
+                )
+
+            local half =
+                part.Size * 0.5
+
+            half += Vector3.new(
+                CONFIG.HazardPaddingXZ,
+                CONFIG.HazardPaddingY,
+                CONFIG.HazardPaddingXZ
+            )
+
+            local dx =
+                math.max(
+                    math.abs(localPoint.X)
+                        - half.X,
+                    0
+                )
+
+            local dy =
+                math.max(
+                    math.abs(localPoint.Y)
+                        - half.Y,
+                    0
+                )
+
+            local dz =
+                math.max(
+                    math.abs(localPoint.Z)
+                        - half.Z,
+                    0
+                )
+
+            local distance =
+                Vector3.new(
+                    dx,
+                    dy,
+                    dz
+                ).Magnitude
+
+            if distance <= 0 then
+                score += 100000
+
+            elseif distance < 5 then
+                score +=
+                    (5 - distance) * 100
+
+            elseif distance < 12 then
+                score +=
+                    (12 - distance) * 14
+
+            elseif distance < 24 then
+                score +=
+                    (24 - distance) * 1.4
+            end
+        end
+    end
+
+    return score
+end
+
+function HazardTracker:GetPointThreat(
+    position
+)
+    return self:GetPointThreatFromActive(
+        position,
+        self:GetActive()
+    )
+end
+
+function HazardTracker:GetTrajectoryThreat(
+    startPosition,
+    direction,
+    distance
+)
+    direction =
+        unit(flatten(direction))
+
+    if direction.Magnitude <= 0 then
+        return 0
+    end
+
+    local active = self:GetActive()
+    if #active == 0 then
+        return 0
+    end
+
+    local total = 0
+    local sample = math.min(2.5, distance)
+
+    while sample <= distance do
+        total +=
+            self:GetPointThreatFromActive(
+                startPosition
+                    + direction * sample,
+                active
+            )
+
+        sample += 2.5
+    end
+
+    return total
+end
+
+function HazardTracker:GetCurrentOverlaps(
+    yaw
+)
+    local root =
+        self.CharacterService.Root
+
+    if not root then
+        return {}
+    end
+
+    return self:GetBodyOverlaps(
+        root.Position,
+        yaw
+    )
+end
+
+function HazardTracker:GetOverlapCountAt(
+    position,
+    yaw
+)
+    return #self:GetBodyOverlaps(
+        position,
+        yaw
+    )
+end
+
+function HazardTracker:Destroy()
+    self.Maid:Clean()
+end
+
+local HitboxESP = {}
+HitboxESP.__index = HitboxESP
+
+function HitboxESP.new(hazardTracker)
+    local folder = Instance.new("Folder")
+    folder.Name = "UIW_HitboxESP"
+    folder.Parent = Workspace
+
+    return setmetatable({
+        HazardTracker = hazardTracker,
+        Folder = folder,
+        Entries = {},
+        EntryConnections = {},
+        Enabled = true,
+        LastUpdate = 0,
+    }, HitboxESP)
+end
+
+function HitboxESP:GetContainer(part)
+    return self.HazardTracker:GetContainer(part)
+end
+
+function HitboxESP:IsContainerVisuallyActive(container)
+    return self.HazardTracker:IsContainerActive(
+        container,
+        os.clock()
+    )
+end
+
+function HitboxESP:IsContainerStableActive(container, now)
+    return self.HazardTracker:IsContainerActive(
+        container,
+        now
+    )
+end
+
+function HitboxESP:GetDistanceToPart(part, point)
+    local p = part.CFrame:PointToObjectSpace(point)
+    local h = part.Size * 0.5
+
+    local dx = math.max(math.abs(p.X) - h.X, 0)
+    local dy = math.max(math.abs(p.Y) - h.Y, 0)
+    local dz = math.max(math.abs(p.Z) - h.Z, 0)
+
+    return Vector3.new(dx, dy, dz).Magnitude
+end
+
+function HitboxESP:Create(part)
+    if self.Entries[part] or not part or not part.Parent then
+        return
+    end
+
+    -- SelectionBox with fully transparent surfaces = outline only.
+    -- This avoids the massive transparent-overdraw cost from filled BoxHandleAdornments.
+    local box = Instance.new("SelectionBox")
+    box.Name = "UIWHitboxOutline"
+    box.Adornee = part
+    box.LineThickness = 0.025
+    box.SurfaceTransparency = 1
+
+    if string.find(string.lower(part.Name), "precast") then
+        box.Color3 = Color3.fromRGB(255, 190, 65)
+        box.SurfaceColor3 = Color3.fromRGB(255, 190, 65)
+    else
+        box.Color3 = Color3.fromRGB(255, 65, 85)
+        box.SurfaceColor3 = Color3.fromRGB(255, 65, 85)
+    end
+
+    box.Parent = self.Folder
+    self.Entries[part] = box
+
+    self.EntryConnections[part] = part.AncestryChanged:Connect(function(_, parent)
+        if parent == nil then
+            self:Remove(part)
+        end
+    end)
+end
+
+function HitboxESP:Remove(part)
+    local connection = self.EntryConnections[part]
+    if connection then
+        pcall(function()
+            connection:Disconnect()
+        end)
+        self.EntryConnections[part] = nil
+    end
+
+    safeDestroy(self.Entries[part])
+    self.Entries[part] = nil
+end
+
+function HitboxESP:Update(force)
+    local now = os.clock()
+    if not force and now - self.LastUpdate < CONFIG.ESPInterval then
+        return
+    end
+    self.LastUpdate = now
+
+    if not self.Enabled then
+        for part in pairs(self.Entries) do
+            self:Remove(part)
+        end
+        return
+    end
+
+    local character = self.HazardTracker.CharacterService
+    local root = character.Root
+    local rootPosition = root and root.Position
+
+    if not rootPosition then
+        return
+    end
+
+    local camera = Workspace.CurrentCamera
+    local cameraPosition = camera and camera.CFrame.Position
+
+    local candidates = {}
+
+    for _, hazard in ipairs(self.HazardTracker:GetActive()) do
+        local part = hazard.Part
+
+        if part and part.Parent then
+            local distance =
+                self:GetDistanceToPart(
+                    part,
+                    rootPosition
+                )
+
+            local inside =
+                distance <= 0.05
+
+            -- SelectionBox can become disproportionately expensive when the camera
+            -- or full character is inside a huge adornment. The dodge solver still
+            -- tracks it; only the visual outline is suppressed until we exit.
+            if not inside
+                and cameraPosition
+            then
+                inside =
+                    self:GetDistanceToPart(
+                        part,
+                        cameraPosition
+                    )
+                    <= 0.05
+            end
+
+            if distance <= CONFIG.ESPRenderDistance
+                and (
+                    not CONFIG.ESPHideWhileInside
+                    or not inside
+                )
+            then
+                candidates[#candidates + 1] = {
+                    Part = part,
+                    Distance = distance,
+                }
+            end
+        end
+    end
+
+    if #candidates > 1 then
+        table.sort(candidates, function(a, b)
+            return a.Distance < b.Distance
+        end)
+    end
+
+    local seen = {}
+    local maxEntries =
+        math.min(
+            CONFIG.ESPMaxEntries,
+            #candidates
+        )
+
+    for i = 1, maxEntries do
+        local part = candidates[i].Part
+        seen[part] = true
+
+        if not self.Entries[part] then
+            self:Create(part)
+        end
+    end
+
+    for part in pairs(self.Entries) do
+        if not part.Parent
+            or not seen[part]
+        then
+            self:Remove(part)
+        end
+    end
+end
+
+function HitboxESP:Destroy()
+    for part in pairs(self.Entries) do
+        self:Remove(part)
+    end
+    safeDestroy(self.Folder)
+end
+
+local GeometrySensor = {}
+GeometrySensor.__index = GeometrySensor
+
+function GeometrySensor.new(characterService)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.RespectCanCollide = true
+
+    return setmetatable({
+        CharacterService = characterService,
+        Params = params,
+        EdgeCache = {},
+        EdgeCacheReset = 0,
+    }, GeometrySensor)
+end
+
+function GeometrySensor:RefreshFilter()
+    local ignore = {}
+
+    if self.CharacterService.Character then
+        table.insert(ignore, self.CharacterService.Character)
+    end
+
+    local esp = Workspace:FindFirstChild("UIW_HitboxESP")
+        or Workspace:FindFirstChild("UnderworldHitboxESP")
+
+    if esp then
+        table.insert(ignore, esp)
+    end
+
+    self.Params.FilterDescendantsInstances = ignore
+end
+
+function GeometrySensor:MakeNavigationRayParams(extraIgnore)
+    local params =
+        RaycastParams.new()
+
+    params.FilterType =
+        Enum.RaycastFilterType.Exclude
+
+    params.RespectCanCollide =
+        true
+
+    local ignore = {}
+
+    if self.CharacterService.Character then
+        table.insert(
+            ignore,
+            self.CharacterService.Character
+        )
+    end
+
+    local esp =
+        Workspace:FindFirstChild(
+            "UIW_HitboxESP"
+        )
+        or Workspace:FindFirstChild(
+            "UnderworldHitboxESP"
+        )
+
+    if esp then
+        table.insert(
+            ignore,
+            esp
+        )
+    end
+
+    if extraIgnore then
+        for _, item in ipairs(
+            extraIgnore
+        ) do
+            if item then
+                table.insert(
+                    ignore,
+                    item
+                )
+            end
+        end
+    end
+
+    params.FilterDescendantsInstances =
+        ignore
+
+    return params
+end
+
+function GeometrySensor:RaycastSkippingEntries(
+    origin,
+    direction,
+    extraIgnore
+)
+    local ignore =
+        {}
+
+    if extraIgnore then
+        for _, instance in ipairs(
+            extraIgnore
+        ) do
+            if instance then
+                table.insert(
+                    ignore,
+                    instance
+                )
+            end
+        end
+    end
+
+    local castOrigin =
+        origin
+
+    local remaining =
+        direction
+
+    for _ = 1, 12 do
+        if remaining.Magnitude
+            <= 0.001
+        then
+            return nil
+        end
+
+        local params =
+            self:MakeNavigationRayParams(
+                ignore
+            )
+
+        local result =
+            Workspace:Raycast(
+                castOrigin,
+                remaining,
+                params
+            )
+
+        if not result then
+            return nil
+        end
+
+        local entry =
+            getEntryAncestor(
+                result.Instance
+            )
+
+        if not entry then
+            return result
+        end
+
+        table.insert(
+            ignore,
+            entry
+        )
+
+        local travelled =
+            math.max(
+                result.Distance,
+                0
+            )
+
+        local epsilon =
+            0.05
+
+        local directionUnit =
+            remaining.Unit
+
+        castOrigin =
+            result.Position
+            + directionUnit
+                * epsilon
+
+        local leftover =
+            math.max(
+                remaining.Magnitude
+                    - travelled
+                    - epsilon,
+                0
+            )
+
+        remaining =
+            directionUnit
+            * leftover
+    end
+
+    return nil
+end
+
+function GeometrySensor:BlockcastSkippingEntries(
+    castCF,
+    size,
+    direction
+)
+    local ignored = {}
+
+    for _ = 1, 8 do
+        local params =
+            self:MakeNavigationRayParams(
+                ignored
+            )
+
+        local ok, result =
+            pcall(function()
+                return Workspace:
+                    Blockcast(
+                        castCF,
+                        size,
+                        direction,
+                        params
+                    )
+            end)
+
+        if not ok then
+            return nil, false
+        end
+
+        if not result then
+            return nil, true
+        end
+
+        if not isEntryInstance(
+            result.Instance
+        ) then
+            return result, true
+        end
+
+        table.insert(
+            ignored,
+            getEntryAncestor(
+                result.Instance
+            )
+            or result.Instance
+        )
+    end
+
+    return nil, true
+end
+
+function GeometrySensor:HasGround(position)
+    local result =
+        self:RaycastSkippingEntries(
+            position
+                + Vector3.new(
+                    0,
+                    3,
+                    0
+                ),
+
+            Vector3.new(
+                0,
+                -CONFIG.GroundProbeDepth,
+                0
+            )
+        )
+
+    return result ~= nil
+end
+
+function GeometrySensor:GetEdgeCacheKey(position, radius)
+    local cell = CONFIG.EdgeCacheCell
+    return tostring(math.floor(position.X / cell + 0.5))
+        .. ":" .. tostring(math.floor(position.Z / cell + 0.5))
+        .. ":" .. tostring(radius)
+end
+
+function GeometrySensor:ResetEdgeCacheIfNeeded()
+    local now = os.clock()
+    if now - self.EdgeCacheReset >= CONFIG.EdgeCacheTTL then
+        table.clear(self.EdgeCache)
+        self.EdgeCacheReset = now
+    end
+end
+
+function GeometrySensor:IsWallProtected(
+    center,
+    probe
+)
+    local direction =
+        flatten(
+            probe - center
+        )
+
+    local distance =
+        direction.Magnitude
+
+    if distance <= 0.05 then
+        return false
+    end
+
+    direction =
+        direction.Unit
+
+    local result =
+        self:RaycastSkippingEntries(
+            center
+                + Vector3.new(
+                    0,
+                    2.4,
+                    0
+                ),
+
+            direction
+                * distance
+        )
+
+    return result ~= nil
+end
+
+function GeometrySensor:IsGroundPadded(position, radius)
+    self:ResetEdgeCacheIfNeeded()
+
+    local key = self:GetEdgeCacheKey(position, radius)
+    local cached = self.EdgeCache[key]
+    if cached ~= nil then
+        return cached
+    end
+
+    if not self:HasGround(position) then
+        self.EdgeCache[key] = false
+        return false
+    end
+
+    for i = 0, 7 do
+        local angle = math.rad(i * 45)
+        local probe = position + Vector3.new(
+            math.cos(angle) * radius,
+            0,
+            math.sin(angle) * radius
+        )
+
+        if not self:HasGround(probe)
+            and not self:IsWallProtected(position, probe)
+        then
+            self.EdgeCache[key] = false
+            return false
+        end
+    end
+
+    self.EdgeCache[key] = true
+    return true
+end
+
+function GeometrySensor:GetEdgeClearanceScore(position)
+    self:ResetEdgeCacheIfNeeded()
+
+    local radius = CONFIG.EdgeWarningPadding
+    local key = "score:" .. self:GetEdgeCacheKey(position, radius)
+    local cached = self.EdgeCache[key]
+    if cached ~= nil then
+        return cached
+    end
+
+    local count = 0
+
+    for i = 0, 7 do
+        local angle = math.rad(i * 45)
+        local probe = position + Vector3.new(
+            math.cos(angle) * radius,
+            0,
+            math.sin(angle) * radius
+        )
+
+        if self:HasGround(probe)
+            or self:IsWallProtected(position, probe)
+        then
+            count += 1
+        end
+    end
+
+    self.EdgeCache[key] = count
+    return count
+end
+
+
+function GeometrySensor:GetDodgeMapScore(origin, direction, yaw)
+    direction = unit(flatten(direction))
+    if direction.Magnitude <= 0 then
+        return -math.huge
+    end
+
+    local root = self.CharacterService.Root
+    if not root then
+        return -math.huge
+    end
+
+    local right = Vector3.new(-direction.Z, 0, direction.X)
+    local lookahead = CONFIG.DodgeMapLookahead or 11
+    local sideProbe = CONFIG.DodgeMapSideProbe or 5.5
+    local score = 0
+
+    -- Sample the actual floor along the dodge path, not only at the endpoint.
+    -- This catches narrow ledges, stair lips and holes that a single endpoint
+    -- ground ray can miss.
+    for _, fraction in ipairs({0.35, 0.70, 1.0}) do
+        local p = origin + direction * (lookahead * fraction)
+        if self:HasGround(p) then
+            score += CONFIG.DodgeMapFloorBonus or 70
+        else
+            score -= 900
+        end
+    end
+
+    -- Measure free space to both sides near the projected destination. A dodge
+    -- into the middle of a corridor scores higher than one that scrapes a wall.
+    local future = origin + direction * math.min(lookahead, CONFIG.DodgeDistance)
+    local rayHeight = Vector3.new(0, 2.3, 0)
+    local leftHit = self:RaycastSkippingEntries(
+        future + rayHeight,
+        -right * sideProbe
+    )
+    local rightHit = self:RaycastSkippingEntries(
+        future + rayHeight,
+        right * sideProbe
+    )
+
+    if leftHit then
+        score -= CONFIG.DodgeMapNearWallPenalty or 230
+    else
+        score += CONFIG.DodgeMapOpenSideBonus or 95
+    end
+
+    if rightHit then
+        score -= CONFIG.DodgeMapNearWallPenalty or 230
+    else
+        score += CONFIG.DodgeMapOpenSideBonus or 95
+    end
+
+    -- Probe slightly ahead-left / ahead-right for corners and funnels. This is
+    -- deliberately cheap (two rays) and only influences ranking; the existing
+    -- full-body blockcast remains the hard collision gate.
+    local diagonalDistance = math.min(7, lookahead)
+    for _, side in ipairs({-1, 1}) do
+        local diagonal = unit(direction * 0.88 + right * side * 0.48)
+        local hit = self:RaycastSkippingEntries(
+            origin + rayHeight,
+            diagonal * diagonalDistance
+        )
+        if hit then
+            score -= 115
+        else
+            score += 45
+        end
+    end
+
+    -- Reward broad floor around the future body position.
+    score += self:GetEdgeClearanceScore(future) * 24
+
+    return score
+end
+
+function GeometrySensor:GetSweepSize()
+    local body = self.CharacterService.BodySize
+
+    return Vector3.new(
+        math.max(2.5, body.X + CONFIG.BodyPaddingXZ * 2),
+        math.clamp(body.Y * 0.46, 2.4, 3.6),
+        math.max(1.8, body.Z + CONFIG.BodyPaddingXZ * 2)
+    )
+end
+
+function GeometrySensor:IsDirectionClear(
+    direction,
+    distance,
+    yaw
+)
+    local character =
+        self.CharacterService
+
+    if not character:IsAlive() then
+        return false
+    end
+
+    direction =
+        unit(
+            flatten(
+                direction
+            )
+        )
+
+    if direction.Magnitude <= 0 then
+        return false
+    end
+
+    local root =
+        character.Root
+
+    yaw =
+        yaw
+        or character.DesiredYaw
+        or directionToYaw(
+            direction
+        )
+
+    local sweepSize =
+        self:GetSweepSize()
+
+    local center =
+        root.Position
+        + Vector3.new(
+            0,
+            math.max(
+                0.8,
+                sweepSize.Y * 0.28
+            ),
+            0
+        )
+
+    local castCF =
+        CFrame.new(center)
+        * CFrame.Angles(
+            0,
+            yaw,
+            0
+        )
+
+    local result, ok =
+        self:BlockcastSkippingEntries(
+            castCF,
+            sweepSize,
+            direction * distance
+        )
+
+    if not ok then
+        return false
+    end
+
+    if result then
+        return false, result
+    end
+
+    local endpoint =
+        root.Position
+        + direction * distance
+
+    if not self:HasGround(
+        endpoint
+    ) then
+        return false
+    end
+
+    return true
+end
+
+function GeometrySensor:IsDirectionClearFrom(
+    origin,
+    direction,
+    distance,
+    yaw
+)
+    local character =
+        self.CharacterService
+
+    if not character:IsAlive() then
+        return false
+    end
+
+    direction =
+        unit(
+            flatten(
+                direction
+            )
+        )
+
+    if direction.Magnitude <= 0 then
+        return false
+    end
+
+    yaw =
+        yaw
+        or character.DesiredYaw
+        or directionToYaw(
+            direction
+        )
+
+    local sweepSize =
+        self:GetSweepSize()
+
+    local center =
+        origin
+        + Vector3.new(
+            0,
+            math.max(
+                0.8,
+                sweepSize.Y * 0.28
+            ),
+            0
+        )
+
+    local castCF =
+        CFrame.new(center)
+        * CFrame.Angles(
+            0,
+            yaw,
+            0
+        )
+
+    local result, ok =
+        self:BlockcastSkippingEntries(
+            castCF,
+            sweepSize,
+            direction * distance
+        )
+
+    if not ok then
+        return false
+    end
+
+    if result then
+        return false, result
+    end
+
+    local endpoint =
+        origin
+        + direction * distance
+
+    if not self:HasGround(
+        endpoint
+    ) then
+        return false
+    end
+
+    return true
+end
+
+function GeometrySensor:GetCollidableBodyOverlaps(position, yaw)
+    local character = self.CharacterService
+    if not character:IsAlive() then
+        return {}
+    end
+
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {character.Character, self.CharacterService.Character}
+    params.MaxParts = 48
+
+    local sweepSize = self:GetSweepSize()
+    local center = position + Vector3.new(0, math.max(1.0, sweepSize.Y * 0.32), 0)
+    local boxCF = CFrame.new(center) * CFrame.Angles(0, yaw or character.DesiredYaw or 0, 0)
+
+    local ok, parts = pcall(function()
+        return Workspace:GetPartBoundsInBox(
+            boxCF,
+            Vector3.new(
+                math.max(1.6, sweepSize.X - 0.35),
+                math.max(1.8, sweepSize.Y - 0.35),
+                math.max(1.4, sweepSize.Z - 0.35)
+            ),
+            params
+        )
+    end)
+
+    if not ok then
+        return {}
+    end
+
+    local result = {}
+
+    for _, part in ipairs(parts) do
+        if part:IsA("BasePart")
+            and part.CanCollide
+            and not isEntryInstance(part)
+            and not part:IsDescendantOf(character.Character)
+        then
+            -- Ignore ordinary floor contact. A wall/large spike that actually
+            -- surrounds the root vertically remains included.
+            local lp = part.CFrame:PointToObjectSpace(position)
+            local half = part.Size * 0.5
+
+            if math.abs(lp.Y) <= half.Y + 1.8 then
+                table.insert(result, part)
+            end
+        end
+    end
+
+    return result
+end
+
+function GeometrySensor:GetCollidableOverlapCountAt(position, yaw)
+    return #self:GetCollidableBodyOverlaps(position, yaw)
+end
+
+function GeometrySensor:GetStartingOverlapEscape(preferred, targetYaw)
+    local character = self.CharacterService
+    if not character:IsAlive() then
+        return nil, 0
+    end
+
+    local root = character.Root
+    local overlaps = self:GetCollidableBodyOverlaps(root.Position, targetYaw)
+    if #overlaps == 0 then
+        return nil, 0
+    end
+
+    local push = Vector3.zero
+
+    for _, part in ipairs(overlaps) do
+        local p = part.CFrame:PointToObjectSpace(root.Position)
+        local half = part.Size * 0.5
+        local px = half.X - math.abs(p.X)
+        local pz = half.Z - math.abs(p.Z)
+        local localExit
+
+        if px < pz then
+            localExit = Vector3.new(p.X >= 0 and 1 or -1, 0, 0)
+        else
+            localExit = Vector3.new(0, 0, p.Z >= 0 and 1 or -1)
+        end
+
+        push += part.CFrame:VectorToWorldSpace(localExit)
+    end
+
+    push = unit(flatten(push))
+    preferred = unit(flatten(preferred))
+
+    if push.Magnitude <= 0 then
+        push = preferred.Magnitude > 0 and -preferred
+            or unit(flatten(root.CFrame.LookVector))
+    end
+
+    local best = nil
+    local bestScore = -math.huge
+    local currentCount = #overlaps
+
+    for _, angle in ipairs({0, 20, -20, 40, -40, 65, -65, 90, -90, 120, -120, 150, -150, 180}) do
+        local direction = unit(rotateXZ(push, angle))
+        local p3 = root.Position + direction * 3
+        local p6 = root.Position + direction * 6
+        local p9 = root.Position + direction * 9
+
+        if self:IsGroundPadded(p6, CONFIG.EdgeHardPadding) then
+            local c3 = self:GetCollidableOverlapCountAt(p3, targetYaw)
+            local c6 = self:GetCollidableOverlapCountAt(p6, targetYaw)
+            local c9 = self:GetCollidableOverlapCountAt(p9, targetYaw)
+
+            local score =
+                (currentCount - c3) * 260
+                + (currentCount - c6) * 420
+                + (currentCount - c9) * 620
+                + self:GetEdgeClearanceScore(p6) * 16
+
+            if preferred.Magnitude > 0 then
+                score += direction:Dot(preferred) * 18
+            end
+
+            if c9 == 0 then
+                score += 900
+            end
+
+            if score > bestScore then
+                bestScore = score
+                best = direction
+            end
+        end
+    end
+
+    return best, currentCount
+end
+
+local DungeonModel = {}
+DungeonModel.__index = DungeonModel
+
+function DungeonModel.new()
+    return setmetatable({
+        Dungeon = nil,
+        Rooms = {},
+        LastKnownRoom = 1,
+
+        EnemyCache = {},
+        LastEnemyRefresh = 0,
+    }, DungeonModel)
+end
+
+function DungeonModel:Refresh()
+    self.Dungeon =
+        Workspace:FindFirstChild(
+            "dungeon"
+        )
+
+    table.clear(
+        self.Rooms
+    )
+
+    if not self.Dungeon then
+        return
+    end
+
+    for _, child in ipairs(
+        self.Dungeon:GetChildren()
+    ) do
+        local number =
+            tonumber(
+                string.match(
+                    child.Name,
+                    "^room(%d+)$"
+                )
+            )
+
+        if number then
+            self.Rooms[number] =
+                child
+        end
+    end
+end
+
+function DungeonModel:WrapEnemy(
+    model,
+    room
+)
+    if not model:IsA("Model") then
+        return nil
+    end
+
+    local humanoid =
+        model:FindFirstChildOfClass(
+            "Humanoid"
+        )
+
+    local root =
+        model:FindFirstChild(
+            "HumanoidRootPart"
+        )
+        or model.PrimaryPart
+
+    if not humanoid
+        or humanoid.Health <= 0
+        or not root
+    then
+        return nil
+    end
+
+    return {
+        Model = model,
+        Humanoid = humanoid,
+        Root = root,
+        Room = room,
+    }
+end
+
+function DungeonModel:GetAliveEnemies(force)
+    local now =
+        os.clock()
+
+    if not force
+        and now - self.LastEnemyRefresh
+        < CONFIG.TargetRefreshInterval
+    then
+        return self.EnemyCache
+    end
+
+    self.LastEnemyRefresh =
+        now
+
+    table.clear(
+        self.EnemyCache
+    )
+
+    for roomNumber, room in pairs(
+        self.Rooms
+    ) do
+        local folder =
+            room:FindFirstChild(
+                "enemyFolder"
+            )
+
+        if folder then
+            for _, model in ipairs(
+                folder:GetChildren()
+            ) do
+                local enemy =
+                    self:WrapEnemy(
+                        model,
+                        roomNumber
+                    )
+
+                if enemy then
+                    table.insert(
+                        self.EnemyCache,
+                        enemy
+                    )
+                end
+            end
+        end
+    end
+
+    if self.Dungeon then
+        local bossRoom =
+            self.Dungeon:
+            FindFirstChild(
+                "bossRoom"
+            )
+
+        local folder =
+            bossRoom
+            and bossRoom:
+                FindFirstChild(
+                    "enemyFolder"
+                )
+
+        if folder then
+            for _, model in ipairs(
+                folder:GetChildren()
+            ) do
+                local enemy =
+                    self:WrapEnemy(
+                        model,
+                        999
+                    )
+
+                if enemy then
+                    table.insert(
+                        self.EnemyCache,
+                        enemy
+                    )
+                end
+            end
+        end
+    end
+
+    return self.EnemyCache
+end
+
+function DungeonModel:FindEnemyByModel(
+    model
+)
+    if not model
+        or not model.Parent
+    then
+        return nil
+    end
+
+    for _, enemy in ipairs(
+        self:GetAliveEnemies()
+    ) do
+        if enemy.Model == model then
+            return enemy
+        end
+    end
+
+    return nil
+end
+
+function DungeonModel:GetNearestEnemy(
+    position
+)
+    local best = nil
+    local bestDistance = math.huge
+
+    for _, enemy in ipairs(
+        self:GetAliveEnemies()
+    ) do
+        local distance =
+            (
+                enemy.Root.Position
+                - position
+            ).Magnitude
+
+        if distance < bestDistance then
+            best =
+                enemy
+
+            bestDistance =
+                distance
+        end
+    end
+
+    if best
+        and best.Room ~= 999
+    then
+        self.LastKnownRoom =
+            math.max(
+                self.LastKnownRoom,
+                best.Room
+            )
+    end
+
+    return best
+end
+
+function DungeonModel:GetMeleeThreats(
+    position,
+    radius
+)
+    local result = {}
+
+    for _, enemy in ipairs(
+        self:GetAliveEnemies()
+    ) do
+        if enemy.Root
+            and enemy.Root.Parent
+            and enemy.Humanoid
+            and enemy.Humanoid.Health > 0
+        then
+            local threatClass =
+                getEnemyThreatClass(
+                    enemy
+                )
+
+            if threatClass then
+                local velocity =
+                    flatten(
+                        enemy.Root.AssemblyLinearVelocity
+                    )
+
+                -- Look slightly ahead so a charging melee mob is treated as
+                -- dangerous before its current position physically reaches us.
+                local predictionTime =
+                    threatClass == "Proximity"
+                    and 0.38
+                    or 0.30
+
+                local predictedPosition =
+                    enemy.Root.Position
+                    + velocity
+                        * predictionTime
+
+                local currentDistance =
+                    flatten(
+                        enemy.Root.Position
+                        - position
+                    ).Magnitude
+
+                local predictedDistance =
+                    flatten(
+                        predictedPosition
+                        - position
+                    ).Magnitude
+
+                local effectiveDistance =
+                    math.min(
+                        currentDistance,
+                        predictedDistance
+                    )
+
+                -- Rush/slam/explosion mobs deserve a little earlier reaction.
+                local detectionRadius =
+                    radius
+                    + (
+                        threatClass == "Proximity"
+                        and 8
+                        or 0
+                    )
+
+                if effectiveDistance
+                    <= detectionRadius
+                then
+                    table.insert(
+                        result,
+                        {
+                            Enemy = enemy,
+                            Distance =
+                                effectiveDistance,
+                            CurrentDistance =
+                                currentDistance,
+                            PredictedDistance =
+                                predictedDistance,
+                            ThreatClass =
+                                threatClass,
+                        }
+                    )
+                end
+            end
+        end
+    end
+
+    table.sort(
+        result,
+        function(a, b)
+            return a.Distance
+                < b.Distance
+        end
+    )
+
+    return result
+end
+
+function DungeonModel:IsCheckpointReachable(
+    position,
+    checkpoint,
+    routePlanner
+)
+    if not checkpoint
+        or not checkpoint:IsA("BasePart")
+        or not checkpoint.Parent
+    then
+        return false
+    end
+
+    if flatten(
+        checkpoint.Position
+        - position
+    ).Magnitude
+        <= CONFIG.ProgressionCheckpointReachDistance
+    then
+        return true
+    end
+
+    local path =
+        PathfindingService:
+        CreatePath({
+            AgentRadius =
+                CONFIG.PathAgentRadius,
+
+            AgentHeight =
+                CONFIG.PathAgentHeight,
+
+            AgentCanJump =
+                true,
+
+            AgentCanClimb =
+                true,
+
+            WaypointSpacing =
+                CONFIG.PathWaypointSpacing,
+        })
+
+    local ok =
+        pcall(function()
+            path:ComputeAsync(
+                position,
+                checkpoint.Position
+            )
+        end)
+
+    if ok
+        and path.Status
+            == Enum.PathStatus.Success
+        and #path:GetWaypoints() > 0
+    then
+        return true
+    end
+
+    if routePlanner
+        and routePlanner.BuildDirectGroundCorridorRoute
+    then
+        local direct =
+            routePlanner:
+            BuildDirectGroundCorridorRoute(
+                position,
+                checkpoint.Position
+            )
+
+        if direct
+            and #direct >= 2
+        then
+            return true
+        end
+    end
+
+    return false
+end
+
+function DungeonModel:GetNextReachableCheckpointTowardRoom(
+    position,
+    targetRoom,
+    minimumRoom,
+    completedCheckpoints,
+    routePlanner
+)
+    if not targetRoom then
+        return nil,
+            nil
+    end
+
+    local maximumRoom
+
+    if targetRoom == 999 then
+        maximumRoom = 9
+    else
+        maximumRoom =
+            math.min(
+                targetRoom,
+                9
+            )
+    end
+
+    local firstRoom =
+        math.max(
+            minimumRoom or 1,
+            1
+        )
+
+    if firstRoom
+        > maximumRoom
+    then
+        return nil,
+            nil
+    end
+
+    local candidates =
+        {}
+
+    -- Important: this loop ONLY moves forward. v27 walked targetRoom-1 down to
+    -- room1, which caused room7 -> room6 -> room5 backtracking after room7 was
+    -- marked complete.
+    for roomNumber =
+        firstRoom,
+        maximumRoom
+    do
+        if not completedCheckpoints
+            or not completedCheckpoints[
+                roomNumber
+            ]
+        then
+            local room =
+                self.Rooms[
+                    roomNumber
+                ]
+
+            local checkpoint =
+                room
+                and room:
+                    FindFirstChild(
+                        "checkPoint"
+                    )
+
+            if checkpoint
+                and checkpoint:IsA(
+                    "BasePart"
+                )
+                and checkpoint.Parent
+            then
+                local distance =
+                    flatten(
+                        checkpoint.Position
+                        - position
+                    ).Magnitude
+
+                if distance
+                    > CONFIG.ProgressionCheckpointReachDistance
+                then
+                    table.insert(
+                        candidates,
+                        {
+                            Part =
+                                checkpoint,
+
+                            Room =
+                                roomNumber,
+
+                            Distance =
+                                distance,
+                        }
+                    )
+                end
+            end
+        end
+    end
+
+    -- On reinjection in the middle of a dungeon, CompletedProgressionCheckpoints
+    -- starts empty. Nearest reachable checkpoint recovers the physical location
+    -- without forcing a trip back through rooms 1, 2, 3, etc.
+    table.sort(
+        candidates,
+        function(a, b)
+            if math.abs(
+                a.Distance
+                - b.Distance
+            ) <= 0.01
+            then
+                return a.Room
+                    > b.Room
+            end
+
+            return a.Distance
+                < b.Distance
+        end
+    )
+
+    for _, candidate in ipairs(
+        candidates
+    ) do
+        if self:
+            IsCheckpointReachable(
+                position,
+                candidate.Part,
+                routePlanner
+            )
+        then
+            return candidate.Part,
+                candidate.Room
+        end
+    end
+
+    return nil,
+        nil
+end
+
+
+function DungeonModel:GetProgressionGoal(
+    position
+)
+    for roomNumber =
+        math.max(
+            self.LastKnownRoom,
+            1
+        ),
+        9
+    do
+        local room =
+            self.Rooms[
+                roomNumber
+            ]
+
+        if room then
+            local checkpoint =
+                room:FindFirstChild(
+                    "checkPoint"
+                )
+
+            if checkpoint
+                and checkpoint:IsA(
+                    "BasePart"
+                )
+            then
+                if flatten(
+                    checkpoint.Position
+                    - position
+                ).Magnitude
+                    > CONFIG.ProgressionCheckpointReachDistance
+                then
+                    return checkpoint.Position
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local RoutePlanner = {}
+RoutePlanner.__index = RoutePlanner
+
+function RoutePlanner.new(
+    characterService,
+    geometry,
+    hazards,
+    dungeon
+)
+    return setmetatable({
+        CharacterService =
+            characterService,
+
+        Geometry =
+            geometry,
+
+        Hazards =
+            hazards,
+
+        Dungeon =
+            dungeon,
+
+        Waypoints =
+            {},
+
+        WaypointIndex =
+            1,
+
+        CurrentGoal =
+            nil,
+
+        PendingGoal =
+            nil,
+
+        ActivePath =
+            nil,
+
+        BlockedConnection =
+            nil,
+
+        Computing =
+            false,
+
+        NeedsRepath =
+            false,
+
+        RequestSerial =
+            0,
+
+        LastCompute =
+            0,
+
+        LastRequestAt =
+            0,
+
+        CurrentWaypointPlaneNormal =
+            Vector3.zero,
+
+        CurrentWaypointPlaneDistance =
+            0,
+
+        LastJumpWaypoint =
+            0,
+
+        LastJumpAt =
+            0,
+
+        CachedSafeDirection =
+            Vector3.zero,
+
+        -- True only for the temporary ground-grid route used after PFS NoPath.
+        FallbackRoute =
+            false,
+
+        LastPathStatus =
+            "None",
+
+        LastNoPathAt =
+            0,
+
+        LastNoPathGoal =
+            nil,
+
+        ConsecutiveNoPath =
+            0,
+
+        LastHeavyFallbackAt =
+            0,
+
+        FrontierCacheGoal =
+            nil,
+
+        FrontierCacheResult =
+            nil,
+
+        FrontierCacheAt =
+            0,
+
+        FrontierProbeCursor =
+            1,
+
+        CreatedEntryModifiers =
+            setmetatable({}, {
+                __mode = "k",
+            }),
+
+        Maid =
+            Maid.new(),
+    }, RoutePlanner)
+end
+
+function RoutePlanner:DisconnectBlocked()
+    if self.BlockedConnection then
+        pcall(function()
+            self.BlockedConnection:
+                Disconnect()
+        end)
+
+        self.BlockedConnection =
+            nil
+    end
+end
+
+function RoutePlanner:ClearPath()
+    self:DisconnectBlocked()
+
+    if self.ActivePath then
+        safeDestroy(
+            self.ActivePath
+        )
+    end
+
+    self.ActivePath =
+        nil
+
+    table.clear(
+        self.Waypoints
+    )
+
+    self.WaypointIndex =
+        1
+
+    self.CurrentWaypointPlaneNormal =
+        Vector3.zero
+
+    self.CurrentWaypointPlaneDistance =
+        0
+
+    self.CachedSafeDirection =
+        Vector3.zero
+
+    self.FallbackRoute =
+        false
+
+    self.LastJumpWaypoint =
+        0
+end
+
+function RoutePlanner:Reset()
+    self.RequestSerial += 1
+
+    self.Computing =
+        false
+
+    self.NeedsRepath =
+        false
+
+    self.CurrentGoal =
+        nil
+
+    self.PendingGoal =
+        nil
+
+    self.LastCompute =
+        0
+
+    self.LastRequestAt =
+        0
+
+    self.LastPathStatus =
+        "None"
+
+    self.LastNoPathAt =
+        0
+
+    self.LastNoPathGoal =
+        nil
+
+    self.ConsecutiveNoPath =
+        0
+
+    self.FrontierCacheGoal =
+        nil
+
+    self.FrontierCacheResult =
+        nil
+
+    self.FrontierCacheAt =
+        0
+
+    self:ClearPath()
+end
+
+function RoutePlanner:InvalidateGoal()
+    self.CurrentGoal =
+        nil
+
+    self.NeedsRepath =
+        true
+end
+
+function RoutePlanner:EnsureEntryPassThrough(instance)
+    if not instance
+        or not instance:IsA("BasePart")
+        or not isEntryInstance(instance)
+    then
+        return
+    end
+
+    local modifier =
+        instance:FindFirstChild(
+            "UIW_EntryPassThrough"
+        )
+
+    if modifier
+        and modifier:IsA(
+            "PathfindingModifier"
+        )
+    then
+        modifier.PassThrough =
+            true
+
+        modifier.Label =
+            "UIWEntry"
+
+        return
+    end
+
+    modifier =
+        Instance.new(
+            "PathfindingModifier"
+        )
+
+    modifier.Name =
+        "UIW_EntryPassThrough"
+
+    modifier.PassThrough =
+        true
+
+    modifier.Label =
+        "UIWEntry"
+
+    modifier.Parent =
+        instance
+
+    self.CreatedEntryModifiers[
+        modifier
+    ] = true
+end
+
+function RoutePlanner:RefreshEntryPassThrough()
+    for _, instance in ipairs(
+        Workspace:GetDescendants()
+    ) do
+        if instance:IsA("BasePart")
+            and isEntryInstance(instance)
+        then
+            self:EnsureEntryPassThrough(
+                instance
+            )
+        end
+    end
+end
+
+function RoutePlanner:Start()
+    self:RefreshEntryPassThrough()
+
+    self.Maid:Give(
+        Workspace.DescendantAdded:
+        Connect(function(instance)
+            if instance:IsA("BasePart") then
+                task.defer(function()
+                    if instance.Parent
+                        and isEntryInstance(
+                            instance
+                        )
+                    then
+                        self:
+                        EnsureEntryPassThrough(
+                            instance
+                        )
+                    end
+                end)
+            end
+        end)
+    )
+end
+
+function RoutePlanner:Destroy()
+    self:Reset()
+
+    self.Maid:
+        Clean()
+
+    for modifier in pairs(
+        self.CreatedEntryModifiers
+    ) do
+        safeDestroy(
+            modifier
+        )
+    end
+
+    table.clear(
+        self.CreatedEntryModifiers
+    )
+end
+
+function RoutePlanner:IsNoPathGroundSafe(
+    result
+)
+    if not result
+        or not result.Instance
+    then
+        return false
+    end
+
+    if result.Normal.Y
+        < CONFIG.NoPathGridMinNormalY
+    then
+        return false
+    end
+
+    local instance =
+        result.Instance
+
+    local root =
+        getWorkspaceRoot(
+            instance
+        )
+
+    if root
+        and string.lower(
+            root.Name or ""
+        ) == "borders"
+    then
+        return false
+    end
+
+    local lowerName =
+        string.lower(
+            instance.Name or ""
+        )
+
+    local fullName =
+        string.lower(
+            instance:GetFullName()
+        )
+
+    -- Permanent, unmistakably lethal world surfaces stay hard-blocked.
+    -- Do NOT use the word "damage" here: some Dungeon Quest maps keep inactive
+    -- secondBossDamageParts in Workspace as the actual walkable route between
+    -- rooms. Live verification showed the floor under the player was:
+    --   Workspace.secondBossDamageParts.Part
+    -- while HazardTracker:IsPartActive(...) == false.
+    local alwaysUnsafeWords = {
+        "lava",
+        "void",
+        "kill",
+    }
+
+    for _, word in ipairs(
+        alwaysUnsafeWords
+    ) do
+        if string.find(
+            lowerName,
+            word,
+            1,
+            true
+        )
+            or string.find(
+                fullName,
+                word,
+                1,
+                true
+            )
+        then
+            return false
+        end
+    end
+
+    -- Dynamic attack/damage geometry is unsafe only while the live hazard
+    -- tracker says this exact floor part is active. This lets the navigator use
+    -- inactive boss-mechanic platforms/stairs, while immediately removing them
+    -- from the fallback graph if their attack activates.
+    if self.Hazards
+        and self.Hazards:IsPartActive(
+            instance,
+            os.clock()
+        )
+    then
+        return false
+    end
+
+    return true
+end
+
+function RoutePlanner:GetNoPathGroundPoint(
+    x,
+    z,
+    probeY,
+    probeDepth,
+    expectedY
+)
+    local origin =
+        Vector3.new(
+            x,
+            probeY,
+            z
+        )
+
+    local remainingDepth =
+        probeDepth
+        or CONFIG.NoPathGridProbeDepth
+
+    local ignored =
+        {}
+
+    local bestPosition =
+        nil
+
+    local bestPart =
+        nil
+
+    local bestError =
+        math.huge
+
+    -- Scan through multiple surfaces instead of blindly accepting the first
+    -- safe hit. This matters in caves / under terrain overhangs: Winter Outpost
+    -- produced a false "floor" at Y84-86 while the real walkable floor directly
+    -- underneath was Y47-49.
+    for _ = 1,
+        CONFIG.NoPathGroundSurfaceScanLimit
+    do
+        if remainingDepth <= 0 then
+            break
+        end
+
+        local result =
+            self.Geometry:
+            RaycastSkippingEntries(
+                origin,
+                Vector3.new(
+                    0,
+                    -remainingDepth,
+                    0
+                ),
+                ignored
+            )
+
+        if not result then
+            break
+        end
+
+        local instance =
+            result.Instance
+
+        local root =
+            getWorkspaceRoot(
+                instance
+            )
+
+        local isBorder =
+            root
+            and string.lower(
+                root.Name or ""
+            ) == "borders"
+
+        local validGround =
+            not isBorder
+            and self:
+                IsNoPathGroundSafe(
+                    result
+                )
+
+        if validGround then
+            if not expectedY then
+                return result.Position,
+                    result.Instance
+            end
+
+            local errorY =
+                math.abs(
+                    result.Position.Y
+                    - expectedY
+                )
+
+            if errorY
+                < bestError
+            then
+                bestError =
+                    errorY
+
+                bestPosition =
+                    result.Position
+
+                bestPart =
+                    result.Instance
+            end
+
+            -- Good local match: use it immediately.
+            if errorY
+                <= CONFIG.NoPathExpectedHeightTolerance
+            then
+                return result.Position,
+                    result.Instance
+            end
+        end
+
+        -- Continue below this surface. We intentionally skip mismatched safe
+        -- terrain too; an overhead Terrain shell can otherwise be mistaken for
+        -- the walkable floor beneath it.
+        local travelled =
+            math.max(
+                result.Distance,
+                0
+            )
+
+        local epsilon =
+            0.35
+
+        origin =
+            result.Position
+            + Vector3.new(
+                0,
+                -epsilon,
+                0
+            )
+
+        remainingDepth -=
+            travelled
+            + epsilon
+
+        -- Skip the exact object we just hit when possible. Terrain cannot be
+        -- ignored wholesale because the actual floor may also be Terrain, so
+        -- for Terrain we rely on moving the origin below the hit surface.
+        if instance ~= Workspace.Terrain then
+            table.insert(
+                ignored,
+                instance
+            )
+        elseif isBorder and root then
+            table.insert(
+                ignored,
+                root
+            )
+        end
+    end
+
+    -- Do not return a wildly different-height surface when an expected route
+    -- elevation was supplied. That is exactly the fake-cliff failure mode.
+    if expectedY
+        and bestPosition
+        and bestError
+            <= CONFIG.NoPathExpectedHeightTolerance
+    then
+        return bestPosition,
+            bestPart
+    end
+
+    return nil
+end
+
+function RoutePlanner:IsNoPathEdgeClear(
+    a,
+    b
+)
+    local signedDeltaY =
+        b.Position.Y
+        - a.Position.Y
+
+    local deltaY =
+        math.abs(
+            signedDeltaY
+        )
+
+    if deltaY
+        > CONFIG.NoPathGridMaxStepHeight
+    then
+        return false
+    end
+
+    -- Do not cast horizontally through the floor: sloped stair/ramp meshes can
+    -- intersect that ray even though the Humanoid can walk them. Instead verify
+    -- that shallow ground samples stay continuously underneath the segment.
+    for _, t in ipairs({
+        0.33,
+        0.66,
+    }) do
+        local x =
+            a.Position.X
+            + (
+                b.Position.X
+                - a.Position.X
+            ) * t
+
+        local z =
+            a.Position.Z
+            + (
+                b.Position.Z
+                - a.Position.Z
+            ) * t
+
+        local expectedY =
+            a.Position.Y
+            + signedDeltaY * t
+
+        local localProbeY =
+            math.max(
+                a.Position.Y,
+                b.Position.Y
+            )
+            + CONFIG.NoPathEdgeProbeAbove
+
+        local groundPosition =
+            self:GetNoPathGroundPoint(
+                x,
+                z,
+                localProbeY,
+                CONFIG.NoPathEdgeProbeDepth,
+                expectedY
+            )
+
+        if not groundPosition then
+            return false
+        end
+
+        if math.abs(
+            groundPosition.Y
+            - expectedY
+        ) > CONFIG.NoPathEdgeHeightTolerance
+        then
+            return false
+        end
+    end
+
+    return true
+end
+
+function RoutePlanner:BuildDirectGroundCorridorRoute(
+    startPosition,
+    desiredGoal
+)
+    local planarDelta =
+        flatten(
+            desiredGoal
+            - startPosition
+        )
+
+    local planarDistance =
+        planarDelta.Magnitude
+
+    if planarDistance <= 1
+        or planarDistance
+            > CONFIG.DirectGroundCorridorMaxDistance
+    then
+        return nil
+    end
+
+    local direction =
+        planarDelta.Unit
+
+    local yaw =
+        directionToYaw(
+            direction
+        )
+
+    -- Require UIW's full-body corridor sweep to be clear.
+    if not self.Geometry:
+        IsDirectionClearFrom(
+            startPosition,
+            direction,
+            planarDistance,
+            yaw
+        )
+    then
+        return nil
+    end
+
+    local count =
+        math.max(
+            2,
+            math.ceil(
+                planarDistance
+                / CONFIG.DirectGroundCorridorStep
+            )
+        )
+
+    -- Direct corridors are used inside visually open passages, including
+    -- low-ceiling caves. Do NOT reuse NoPathGridProbeAbove (85): live testing
+    -- in the Enchanted Forest room7 -> room8 tunnel showed that an 85-stud
+    -- downward probe starts above the cave and hits the roof/mountain terrain.
+    -- +20 stayed inside the tunnel and resolved all floor samples correctly.
+    local probeY =
+        math.max(
+            startPosition.Y,
+            desiredGoal.Y
+        )
+        + CONFIG.DirectGroundCorridorProbeAbove
+
+    local nodes =
+        {}
+
+    for index = 0, count do
+        local t =
+            index / count
+
+        local x =
+            startPosition.X
+            + (
+                desiredGoal.X
+                - startPosition.X
+            ) * t
+
+        local z =
+            startPosition.Z
+            + (
+                desiredGoal.Z
+                - startPosition.Z
+            ) * t
+
+        local expectedY =
+            startPosition.Y
+            + (
+                desiredGoal.Y
+                - startPosition.Y
+            ) * t
+
+        local groundPosition,
+            groundPart =
+            self:GetNoPathGroundPoint(
+                x,
+                z,
+                probeY,
+                nil,
+                expectedY
+            )
+
+        if not groundPosition then
+            return nil
+        end
+
+        local node = {
+            Position =
+                groundPosition,
+
+            Ground =
+                groundPart,
+        }
+
+        if #nodes > 0 then
+            local previous =
+                nodes[
+                    #nodes
+                ]
+
+            if math.abs(
+                node.Position.Y
+                - previous.Position.Y
+            ) > CONFIG.NoPathGridMaxStepHeight
+            then
+                return nil
+            end
+
+            if not self:
+                IsNoPathEdgeClear(
+                    previous,
+                    node
+                )
+            then
+                return nil
+            end
+        end
+
+        table.insert(
+            nodes,
+            node
+        )
+    end
+
+    local waypoints =
+        {}
+
+    for index, node in ipairs(
+        nodes
+    ) do
+        local action =
+            Enum.PathWaypointAction.Walk
+
+        if index > 1 then
+            local previous =
+                nodes[
+                    index - 1
+                ]
+
+            if node.Position.Y
+                    - previous.Position.Y
+                >= CONFIG.NoPathGridJumpRise
+            then
+                action =
+                    Enum.PathWaypointAction.Jump
+            end
+        end
+
+        table.insert(
+            waypoints,
+            {
+                Position =
+                    node.Position
+                    + Vector3.new(
+                        0,
+                        0.15,
+                        0
+                    ),
+
+                Action =
+                    action,
+            }
+        )
+    end
+
+    if #waypoints >= 2 then
+        return waypoints
+    end
+
+    return nil
+end
+
+
+function RoutePlanner:FindReachableFrontierGoal(
+    startPosition,
+    desiredGoal
+)
+    local now = os.clock()
+
+    -- Reuse a recent answer for the same destination. GetGoal can run many times
+    -- per second; without this cache every call could launch several ComputeAsyncs.
+    if self.FrontierCacheGoal
+        and (
+            self.FrontierCacheGoal
+            - desiredGoal
+        ).Magnitude <= CONFIG.GoalChangeThreshold
+    then
+        local ttl = self.FrontierCacheResult
+            and CONFIG.ProgressionFrontierCacheTTL
+            or CONFIG.ProgressionFrontierFailureCacheTTL
+
+        if now - self.FrontierCacheAt < ttl then
+            return self.FrontierCacheResult
+        end
+    end
+
+    local toward =
+        unit(
+            flatten(
+                desiredGoal - startPosition
+            )
+        )
+
+    if toward.Magnitude <= 0 then
+        return nil
+    end
+
+    local startPlanarDistance =
+        flatten(
+            desiredGoal - startPosition
+        ).Magnitude
+
+    -- Build the lightweight candidate ordering first, then spend a strict budget
+    -- of expensive ground probes / ComputeAsync calls this cycle.
+    local candidates = {}
+    for _, radius in ipairs(CONFIG.ProgressionFrontierProbeRadii) do
+        for _, angle in ipairs(CONFIG.RouteAngles) do
+            table.insert(candidates, {
+                Radius = radius,
+                Angle = angle,
+            })
+        end
+    end
+
+    local count = #candidates
+    if count == 0 then
+        return nil
+    end
+
+    local cursor = math.clamp(self.FrontierProbeCursor or 1, 1, count)
+    local budget = math.max(1, CONFIG.ProgressionFrontierProbeBudget or 3)
+    local bestGoal = nil
+    local bestScore = -math.huge
+    local tested = 0
+    local visited = 0
+
+    while tested < budget and visited < count do
+        local spec = candidates[cursor]
+        cursor += 1
+        if cursor > count then
+            cursor = 1
+        end
+        visited += 1
+
+        local direction = rotateXZ(toward, spec.Angle)
+        local sampleXZ = startPosition + direction * spec.Radius
+        local ground = self:GetNoPathGroundPoint(
+            sampleXZ.X,
+            sampleXZ.Z,
+            startPosition.Y + CONFIG.DirectGroundCorridorProbeAbove,
+            90,
+            startPosition.Y
+        )
+
+        if ground then
+            tested += 1
+            local candidate = ground + Vector3.new(0, 0.15, 0)
+            local candidateDistance = flatten(desiredGoal - candidate).Magnitude
+            local progress = startPlanarDistance - candidateDistance
+
+            -- Reject clearly backward samples before spending a path computation.
+            if progress >= -2 then
+                local path = PathfindingService:CreatePath({
+                    AgentRadius = CONFIG.PathAgentRadius,
+                    AgentHeight = CONFIG.PathAgentHeight,
+                    AgentCanJump = true,
+                    WaypointSpacing = CONFIG.PathWaypointSpacing,
+                })
+
+                local ok = pcall(function()
+                    path:ComputeAsync(startPosition, candidate)
+                end)
+
+                if ok
+                    and path.Status == Enum.PathStatus.Success
+                    and #path:GetWaypoints() > 0
+                then
+                    local verticalImprovement =
+                        math.abs(startPosition.Y - desiredGoal.Y)
+                        - math.abs(candidate.Y - desiredGoal.Y)
+
+                    local score =
+                        progress * 5
+                        + verticalImprovement * 0.35
+                        + direction:Dot(toward) * 8
+                        - math.abs(spec.Angle) * 0.025
+
+                    if progress >= CONFIG.ProgressionFrontierMinProgress
+                        or bestGoal == nil
+                    then
+                        if score > bestScore then
+                            bestScore = score
+                            bestGoal = candidate
+                        end
+                    end
+                end
+
+                safeDestroy(path)
+            end
+        end
+    end
+
+    self.FrontierProbeCursor = cursor
+    self.FrontierCacheGoal = desiredGoal
+    self.FrontierCacheResult = bestGoal
+    self.FrontierCacheAt = now
+
+    return bestGoal
+end
+
+
+function RoutePlanner:BuildNoPathGroundRoute(
+    startPosition,
+    desiredGoal
+)
+    local planarDelta =
+        flatten(
+            desiredGoal
+            - startPosition
+        )
+
+    local planarDistance =
+        planarDelta.Magnitude
+
+    if planarDistance <= 1 then
+        return nil
+    end
+
+    -- Bound the expensive fallback to a local chunk. For a very distant goal,
+    -- aim a chunk in its direction and re-evaluate when that chunk is completed.
+    local searchGoal =
+        desiredGoal
+
+    if planarDistance
+        > CONFIG.NoPathGridMaxSpan
+    then
+        searchGoal =
+            startPosition
+            + planarDelta.Unit
+                * CONFIG.NoPathGridMaxSpan
+    end
+
+    local margin =
+        CONFIG.NoPathGridMargin
+
+    local step =
+        CONFIG.NoPathGridStep
+
+    local minX =
+        math.floor(
+            (
+                math.min(
+                    startPosition.X,
+                    searchGoal.X
+                )
+                - margin
+            ) / step
+        ) * step
+
+    local maxX =
+        math.ceil(
+            (
+                math.max(
+                    startPosition.X,
+                    searchGoal.X
+                )
+                + margin
+            ) / step
+        ) * step
+
+    local minZ =
+        math.floor(
+            (
+                math.min(
+                    startPosition.Z,
+                    searchGoal.Z
+                )
+                - margin
+            ) / step
+        ) * step
+
+    local maxZ =
+        math.ceil(
+            (
+                math.max(
+                    startPosition.Z,
+                    searchGoal.Z
+                )
+                + margin
+            ) / step
+        ) * step
+
+    local countX =
+        math.floor(
+            (maxX - minX) / step
+            + 0.5
+        )
+
+    local countZ =
+        math.floor(
+            (maxZ - minZ) / step
+            + 0.5
+        )
+
+    if (
+        countX + 1
+    ) * (
+        countZ + 1
+    ) > CONFIG.NoPathGridMaxNodes
+    then
+        return nil
+    end
+
+    local probeY =
+        math.max(
+            startPosition.Y,
+            desiredGoal.Y
+        )
+        + CONFIG.NoPathGridProbeAbove
+
+    local nodes =
+        {}
+
+    local function key(
+        ix,
+        iz
+    )
+        return tostring(ix)
+            .. ":"
+            .. tostring(iz)
+    end
+
+    for ix = 0, countX do
+        local x =
+            minX
+            + ix * step
+
+        for iz = 0, countZ do
+            local z =
+                minZ
+                + iz * step
+
+            local segment =
+                flatten(
+                    searchGoal
+                    - startPosition
+                )
+
+            local segmentLengthSq =
+                segment.X * segment.X
+                + segment.Z * segment.Z
+
+            local routeT =
+                0
+
+            if segmentLengthSq > 0.001 then
+                local fromStart =
+                    Vector3.new(
+                        x - startPosition.X,
+                        0,
+                        z - startPosition.Z
+                    )
+
+                routeT =
+                    math.clamp(
+                        (
+                            fromStart.X * segment.X
+                            + fromStart.Z * segment.Z
+                        )
+                        / segmentLengthSq,
+                        0,
+                        1
+                    )
+            end
+
+            local expectedY =
+                startPosition.Y
+                + (
+                    searchGoal.Y
+                    - startPosition.Y
+                ) * routeT
+
+            local groundPosition,
+                groundPart =
+                self:GetNoPathGroundPoint(
+                    x,
+                    z,
+                    probeY,
+                    nil,
+                    expectedY
+                )
+
+            if groundPosition then
+                nodes[
+                    key(
+                        ix,
+                        iz
+                    )
+                ] = {
+                    IX = ix,
+                    IZ = iz,
+                    Position =
+                        groundPosition,
+                    Ground =
+                        groundPart,
+                }
+            end
+        end
+    end
+
+    local nodeCount =
+        0
+
+    for _ in pairs(nodes) do
+        nodeCount += 1
+    end
+
+    if nodeCount < 2 then
+        return nil
+    end
+
+    local function nearestNode(
+        position
+    )
+        local best =
+            nil
+
+        local bestDistance =
+            math.huge
+
+        for _, node in pairs(
+            nodes
+        ) do
+            local distance =
+                flatten(
+                    node.Position
+                    - position
+                ).Magnitude
+
+            if distance < bestDistance then
+                best =
+                    node
+
+                bestDistance =
+                    distance
+            end
+        end
+
+        return best,
+            bestDistance
+    end
+
+    local startNode,
+        startDistance =
+        nearestNode(
+            startPosition
+        )
+
+    local goalNode,
+        goalDistance =
+        nearestNode(
+            searchGoal
+        )
+
+    if not startNode
+        or not goalNode
+        or startDistance
+            > step * 1.8
+        or goalDistance
+            > step * 2.2
+    then
+        return nil
+    end
+
+    local startKey =
+        key(
+            startNode.IX,
+            startNode.IZ
+        )
+
+    local goalKey =
+        key(
+            goalNode.IX,
+            goalNode.IZ
+        )
+
+    local open = {
+        [startKey] = true,
+    }
+
+    local cameFrom =
+        {}
+
+    local gScore = {
+        [startKey] = 0,
+    }
+
+    local directions = {
+        { 1, 0 },
+        { -1, 0 },
+        { 0, 1 },
+        { 0, -1 },
+        { 1, 1 },
+        { 1, -1 },
+        { -1, 1 },
+        { -1, -1 },
+    }
+
+    local edgeCache =
+        {}
+
+    local function heuristic(node)
+        return flatten(
+            goalNode.Position
+            - node.Position
+        ).Magnitude
+    end
+
+    local foundKey =
+        nil
+
+    for _ = 1,
+        math.min(
+            nodeCount * 5,
+            8000
+        )
+    do
+        local currentKey =
+            nil
+
+        local currentNode =
+            nil
+
+        local currentF =
+            math.huge
+
+        for candidateKey in pairs(
+            open
+        ) do
+            local candidate =
+                nodes[
+                    candidateKey
+                ]
+
+            local f =
+                (
+                    gScore[
+                        candidateKey
+                    ]
+                    or math.huge
+                )
+                + heuristic(
+                    candidate
+                )
+
+            if f < currentF then
+                currentKey =
+                    candidateKey
+
+                currentNode =
+                    candidate
+
+                currentF =
+                    f
+            end
+        end
+
+        if not currentNode then
+            break
+        end
+
+        if currentKey
+            == goalKey
+        then
+            foundKey =
+                currentKey
+
+            break
+        end
+
+        open[
+            currentKey
+        ] = nil
+
+        for _, offset in ipairs(
+            directions
+        ) do
+            local nextKey =
+                key(
+                    currentNode.IX
+                        + offset[1],
+
+                    currentNode.IZ
+                        + offset[2]
+                )
+
+            local nextNode =
+                nodes[
+                    nextKey
+                ]
+
+            if nextNode then
+                local edgeKey =
+                    currentKey
+                    .. ">"
+                    .. nextKey
+
+                local clear =
+                    edgeCache[
+                        edgeKey
+                    ]
+
+                if clear == nil then
+                    clear =
+                        self:
+                        IsNoPathEdgeClear(
+                            currentNode,
+                            nextNode
+                        )
+
+                    edgeCache[
+                        edgeKey
+                    ] =
+                        clear
+                end
+
+                if clear then
+                    local planarCost =
+                        flatten(
+                            nextNode.Position
+                            - currentNode.Position
+                        ).Magnitude
+
+                    local riseCost =
+                        math.abs(
+                            nextNode.Position.Y
+                            - currentNode.Position.Y
+                        ) * 1.5
+
+                    local tentative =
+                        (
+                            gScore[
+                                currentKey
+                            ]
+                            or 0
+                        )
+                        + planarCost
+                        + riseCost
+
+                    if tentative
+                        < (
+                            gScore[
+                                nextKey
+                            ]
+                            or math.huge
+                        )
+                    then
+                        cameFrom[
+                            nextKey
+                        ] =
+                            currentKey
+
+                        gScore[
+                            nextKey
+                        ] =
+                            tentative
+
+                        open[
+                            nextKey
+                        ] =
+                            true
+                    end
+                end
+            end
+        end
+    end
+
+    if not foundKey then
+        return nil
+    end
+
+    local reversed =
+        {}
+
+    local currentKey =
+        foundKey
+
+    while currentKey do
+        local node =
+            nodes[
+                currentKey
+            ]
+
+        if not node then
+            break
+        end
+
+        table.insert(
+            reversed,
+            1,
+            node
+        )
+
+        currentKey =
+            cameFrom[
+                currentKey
+            ]
+    end
+
+    if #reversed < 2 then
+        return nil
+    end
+
+    local waypoints =
+        {}
+
+    for index, node in ipairs(
+        reversed
+    ) do
+        local action =
+            Enum.PathWaypointAction.Walk
+
+        if index > 1 then
+            local previous =
+                reversed[
+                    index - 1
+                ]
+
+            if node.Position.Y
+                    - previous.Position.Y
+                >= CONFIG.NoPathGridJumpRise
+            then
+                action =
+                    Enum.PathWaypointAction.Jump
+            end
+        end
+
+        table.insert(
+            waypoints,
+            {
+                Position =
+                    node.Position
+                    + Vector3.new(
+                        0,
+                        0.15,
+                        0
+                    ),
+
+                Action =
+                    action,
+            }
+        )
+    end
+
+    return waypoints
+end
+
+function RoutePlanner:InstallFallbackRoute(
+    waypoints,
+    desiredGoal
+)
+    if not waypoints
+        or #waypoints < 2
+    then
+        return false
+    end
+
+    self:DisconnectBlocked()
+
+    if self.ActivePath then
+        safeDestroy(
+            self.ActivePath
+        )
+    end
+
+    self.ActivePath =
+        nil
+
+    self.Waypoints =
+        waypoints
+
+    self.WaypointIndex =
+        self:FindStartingWaypoint(
+            waypoints
+        )
+
+    -- Keep the real mob/progression goal here so GetRawDirection does not
+    -- immediately discard the temporary fallback route.
+    self.CurrentGoal =
+        desiredGoal
+
+    self.NeedsRepath =
+        false
+
+    self.CachedSafeDirection =
+        Vector3.zero
+
+    self.FallbackRoute =
+        true
+
+    self.LastPathStatus =
+        "GroundFallback"
+
+    self:SetupWaypointPlane()
+
+    return true
+end
+
+function RoutePlanner:CreatePath()
+    return PathfindingService:
+        CreatePath({
+            AgentRadius =
+                CONFIG.PathAgentRadius,
+
+            AgentHeight =
+                CONFIG.PathAgentHeight,
+
+            AgentCanJump =
+                true,
+
+            AgentCanClimb =
+                true,
+
+            WaypointSpacing =
+                CONFIG.PathWaypointSpacing,
+        })
+end
+
+function RoutePlanner:FindStartingWaypoint(
+    waypoints
+)
+    local root =
+        self.CharacterService.Root
+
+    if not root
+        or #waypoints == 0
+    then
+        return 1
+    end
+
+    if #waypoints == 1 then
+        return 1
+    end
+
+    local index =
+        2
+
+    while index
+        <= #waypoints
+    do
+        local delta =
+            flatten(
+                waypoints[index].Position
+                - root.Position
+            )
+
+        if delta.Magnitude
+            >= CONFIG.PathWaypointStartRadius
+        then
+            break
+        end
+
+        index += 1
+    end
+
+    return math.min(
+        index,
+        #waypoints
+    )
+end
+
+function RoutePlanner:SetupWaypointPlane()
+    self.CurrentWaypointPlaneNormal =
+        Vector3.zero
+
+    self.CurrentWaypointPlaneDistance =
+        0
+
+    local index =
+        self.WaypointIndex
+
+    if index <= 1
+        or index > #self.Waypoints
+    then
+        return
+    end
+
+    local previous =
+        self.Waypoints[
+            index - 1
+        ]
+
+    local current =
+        self.Waypoints[
+            index
+        ]
+
+    if not previous
+        or not current
+    then
+        return
+    end
+
+    local normal =
+        previous.Position
+        - current.Position
+
+    normal =
+        Vector3.new(
+            normal.X,
+            0,
+            normal.Z
+        )
+
+    if normal.Magnitude
+        <= 0.000001
+    then
+        return
+    end
+
+    normal =
+        normal.Unit
+
+    self.CurrentWaypointPlaneNormal =
+        normal
+
+    self.CurrentWaypointPlaneDistance =
+        normal:Dot(
+            current.Position
+        )
+end
+
+function RoutePlanner:IsCurrentWaypointReached()
+    if self.WaypointIndex
+        > #self.Waypoints
+    then
+        return true
+    end
+
+    if not self.CharacterService:
+        IsAlive()
+    then
+        return false
+    end
+
+    local root =
+        self.CharacterService.Root
+
+    local normal =
+        self.CurrentWaypointPlaneNormal
+
+    if normal.Magnitude
+        <= 0.000001
+    then
+        return true
+    end
+
+    local distance =
+        normal:Dot(
+            root.Position
+        )
+        - self.CurrentWaypointPlaneDistance
+
+    local forwardVelocity =
+        -normal:Dot(
+            root.AssemblyLinearVelocity
+        )
+
+    local threshold =
+        math.max(
+            CONFIG.PathPlaneMinThreshold,
+
+            CONFIG.PathPlaneVelocityMultiplier
+                * math.max(
+                    0,
+                    forwardVelocity
+                )
+        )
+
+    return distance
+        <= threshold
+end
+
+function RoutePlanner:AdvanceWaypoints()
+    while self.WaypointIndex
+        <= #self.Waypoints
+        and self:IsCurrentWaypointReached()
+    do
+        self.WaypointIndex += 1
+
+        self.LastJumpWaypoint =
+            0
+
+        self:SetupWaypointPlane()
+    end
+end
+
+function RoutePlanner:HandleWaypointJump()
+    local waypoint =
+        self.Waypoints[
+            self.WaypointIndex
+        ]
+
+    if not waypoint
+        or waypoint.Action
+            ~= Enum.PathWaypointAction.Jump
+    then
+        return
+    end
+
+    local humanoid =
+        self.CharacterService.Humanoid
+
+    if not humanoid
+        or humanoid.FloorMaterial
+            == Enum.Material.Air
+    then
+        return
+    end
+
+    local now =
+        os.clock()
+
+    if self.LastJumpWaypoint
+            == self.WaypointIndex
+        and now
+            - self.LastJumpAt
+            < CONFIG.PathJumpRetry
+    then
+        return
+    end
+
+    self.LastJumpWaypoint =
+        self.WaypointIndex
+
+    self.LastJumpAt =
+        now
+
+    humanoid:
+        ChangeState(
+            Enum.HumanoidStateType.Jumping
+        )
+end
+
+function RoutePlanner:InstallPath(
+    path,
+    waypoints,
+    goal
+)
+    if not path
+        or #waypoints == 0
+    then
+        return false
+    end
+
+    local oldPath =
+        self.ActivePath
+
+    self:DisconnectBlocked()
+
+    self.ActivePath =
+        path
+
+    self.Waypoints =
+        waypoints
+
+    self.WaypointIndex =
+        self:FindStartingWaypoint(
+            waypoints
+        )
+
+    self.CurrentGoal =
+        goal
+
+    self.NeedsRepath =
+        false
+
+    self.CachedSafeDirection =
+        Vector3.zero
+
+    self.FallbackRoute =
+        false
+
+    self.LastPathStatus =
+        "Success"
+
+    self:SetupWaypointPlane()
+
+    local installedPath =
+        path
+
+    self.BlockedConnection =
+        path.Blocked:
+        Connect(function(
+            blockedWaypointIndex
+        )
+            if self.ActivePath
+                ~= installedPath
+            then
+                return
+            end
+
+            -- Ignore blocks that are already behind us.
+            if blockedWaypointIndex
+                >= self.WaypointIndex
+            then
+                self.NeedsRepath =
+                    true
+
+                local target =
+                    self.CurrentGoal
+
+                if target then
+                    task.defer(function()
+                        if self.ActivePath
+                                == installedPath
+                            and self.NeedsRepath
+                        then
+                            self:RequestPath(
+                                target,
+                                true
+                            )
+                        end
+                    end)
+                end
+            end
+        end)
+
+    if oldPath
+        and oldPath ~= path
+    then
+        safeDestroy(
+            oldPath
+        )
+    end
+
+    return true
+end
+
+function RoutePlanner:RequestPath(
+    goal,
+    force
+)
+    if not goal
+        or not self.CharacterService:
+            IsAlive()
+    then
+        return
+    end
+
+    local now =
+        os.clock()
+
+    -- Do not rebuild the expensive ground grid every frame if both PFS and the
+    -- fallback failed for effectively the same goal.
+    if self.LastPathStatus
+            == "NoPath"
+        and self.LastNoPathGoal
+        and (
+            self.LastNoPathGoal
+            - goal
+        ).Magnitude
+            <= CONFIG.GoalChangeThreshold
+        and now
+            - self.LastNoPathAt
+            < math.min(
+                CONFIG.NoPathRetryMaxInterval,
+                CONFIG.NoPathRetryInterval
+                    * math.max(1, 2 ^ math.max(0, (self.ConsecutiveNoPath or 1) - 1))
+            )
+    then
+        return
+    end
+
+    if #self.Waypoints > 0
+        and now
+            - self.LastRequestAt
+            < CONFIG.PathRecomputeThrottle
+    then
+        self.PendingGoal =
+            goal
+
+        return
+    end
+
+    if self.Computing then
+        self.PendingGoal =
+            goal
+
+        if force then
+            self.NeedsRepath =
+                true
+        end
+
+        return
+    end
+
+    if not force
+        and self.CurrentGoal
+        and (
+            self.CurrentGoal
+            - goal
+        ).Magnitude
+            <= CONFIG.GoalChangeThreshold
+        and #self.Waypoints > 0
+        and self.WaypointIndex
+            <= #self.Waypoints
+        and not self.NeedsRepath
+    then
+        return
+    end
+
+    self.LastRequestAt =
+        now
+
+    self.Computing =
+        true
+
+    self.RequestSerial += 1
+
+    local serial =
+        self.RequestSerial
+
+    local startPosition =
+        self.CharacterService
+            .Root.Position
+
+    local requestedGoal =
+        goal
+
+    task.spawn(function()
+        local path =
+            self:CreatePath()
+
+        local success =
+            pcall(function()
+                path:ComputeAsync(
+                    startPosition,
+                    requestedGoal
+                )
+            end)
+
+        if serial
+            ~= self.RequestSerial
+        then
+            safeDestroy(
+                path
+            )
+
+            return
+        end
+
+        local installed =
+            false
+
+        if success
+            and path.Status
+                == Enum.PathStatus.Success
+        then
+            local waypoints =
+                path:GetWaypoints()
+
+            if #waypoints > 0 then
+                installed =
+                    self:InstallPath(
+                        path,
+                        waypoints,
+                        requestedGoal
+                    )
+
+                if installed then
+                    self.ConsecutiveNoPath = 0
+                end
+            end
+        end
+
+        if not installed then
+            safeDestroy(
+                path
+            )
+
+            -- Do not keep driving on a completed/stale route after NoPath.
+            self.CachedSafeDirection =
+                Vector3.zero
+
+            local directWaypoints =
+                self:
+                BuildDirectGroundCorridorRoute(
+                    startPosition,
+                    requestedGoal
+                )
+
+            if serial
+                ~= self.RequestSerial
+            then
+                return
+            end
+
+            if directWaypoints
+                and #directWaypoints >= 2
+            then
+                installed =
+                    self:
+                    InstallFallbackRoute(
+                        directWaypoints,
+                        requestedGoal
+                    )
+
+                if installed then
+                    self.LastPathStatus =
+                        "DirectFallback"
+                end
+            end
+
+            local fallbackWaypoints =
+                nil
+
+            -- The full ground-grid search is the most expensive recovery path.
+            -- Never run it on every recalculation; let cheap PFS/direct/frontier
+            -- recovery get a chance between heavy scans.
+            if not installed
+                and os.clock() - (self.LastHeavyFallbackAt or 0)
+                    >= CONFIG.NoPathHeavyFallbackCooldown
+            then
+                self.LastHeavyFallbackAt = os.clock()
+                fallbackWaypoints =
+                    self:
+                    BuildNoPathGroundRoute(
+                        startPosition,
+                        requestedGoal
+                    )
+            end
+
+            if serial
+                ~= self.RequestSerial
+            then
+                return
+            end
+
+            if not installed
+                and fallbackWaypoints
+                and #fallbackWaypoints >= 2
+            then
+                installed =
+                    self:
+                    InstallFallbackRoute(
+                        fallbackWaypoints,
+                        requestedGoal
+                    )
+            end
+
+            if not installed then
+                -- Failed means STOP, not "reuse whatever direction happened to
+                -- be cached from the previous target/path".
+                self:ClearPath()
+
+                self.CurrentGoal =
+                    requestedGoal
+
+                self.NeedsRepath =
+                    true
+
+                self.LastPathStatus =
+                    "NoPath"
+
+                self.ConsecutiveNoPath =
+                    math.min(
+                        4,
+                        (self.ConsecutiveNoPath or 0) + 1
+                    )
+
+                self.LastNoPathAt =
+                    os.clock()
+
+                self.LastNoPathGoal =
+                    requestedGoal
+            end
+        else
+            self.LastNoPathGoal =
+                nil
+
+            self.LastNoPathAt =
+                0
+        end
+
+        self.LastCompute =
+            os.clock()
+
+        self.Computing =
+            false
+
+        local pending =
+            self.PendingGoal
+
+        self.PendingGoal =
+            nil
+
+        if pending
+            and self.CharacterService:
+                IsAlive()
+        then
+            local needsPending =
+                not self.CurrentGoal
+                or (
+                    self.CurrentGoal
+                    - pending
+                ).Magnitude
+                    > CONFIG.GoalChangeThreshold
+                or self.NeedsRepath
+
+            if needsPending then
+                task.defer(function()
+                    self:RequestPath(
+                        pending,
+                        true
+                    )
+                end)
+            end
+        end
+    end)
+end
+
+function RoutePlanner:ForceRepath(goal)
+    self.NeedsRepath =
+        true
+
+    goal =
+        goal
+        or self.CurrentGoal
+
+    if goal then
+        self:RequestPath(
+            goal,
+            true
+        )
+    end
+end
+
+function RoutePlanner:GetRawDirection(goal, reachDistance)
+    local character =
+        self.CharacterService
+
+    if not character:IsAlive()
+        or not goal
+    then
+        self.CachedSafeDirection =
+            Vector3.zero
+
+        return Vector3.zero
+    end
+
+    local root =
+        character.Root
+
+    local goalDelta =
+        flatten(
+            goal
+            - root.Position
+        )
+
+    local effectiveReachDistance =
+        tonumber(reachDistance)
+        or CONFIG.PathGoalReachDistance
+
+    if goalDelta.Magnitude
+        <= effectiveReachDistance
+    then
+        self.CachedSafeDirection =
+            Vector3.zero
+
+        return Vector3.zero
+    end
+
+    local goalChanged =
+        not self.CurrentGoal
+        or (
+            self.CurrentGoal
+            - goal
+        ).Magnitude
+            > CONFIG.GoalChangeThreshold
+
+    if goalChanged then
+        self:RequestPath(
+            goal,
+            true
+        )
+
+    elseif self.NeedsRepath then
+        self:RequestPath(
+            goal,
+            true
+        )
+
+    elseif #self.Waypoints == 0 then
+        self:RequestPath(
+            goal,
+            true
+        )
+    end
+
+    if #self.Waypoints > 0
+        and self.WaypointIndex
+            <= #self.Waypoints
+    then
+        self:AdvanceWaypoints()
+    end
+
+    -- Critical v17 fix: once the active waypoint list is exhausted, the old
+    -- CachedSafeDirection is invalid immediately. The previous build could sit
+    -- at WaypointIndex 19/18 and keep walking forever on that stale vector.
+    if #self.Waypoints > 0
+        and self.WaypointIndex
+            > #self.Waypoints
+    then
+        self.CachedSafeDirection =
+            Vector3.zero
+
+        self:ClearPath()
+
+        self.CurrentGoal =
+            goal
+
+        self.NeedsRepath =
+            true
+
+        self:RequestPath(
+            goal,
+            true
+        )
+
+        return Vector3.zero
+    end
+
+    if self.WaypointIndex
+        <= #self.Waypoints
+        and #self.Waypoints > 0
+    then
+        self:HandleWaypointJump()
+
+        local waypoint =
+            self.Waypoints[
+                self.WaypointIndex
+            ]
+
+        local delta =
+            flatten(
+                waypoint.Position
+                - root.Position
+            )
+
+        if delta.Magnitude > 0.05 then
+            local direction =
+                unit(
+                    delta
+                )
+
+            self.CachedSafeDirection =
+                direction
+
+            return direction
+        end
+    end
+
+    -- Atomic replacement is still allowed ONLY while a real unfinished path is
+    -- active. A completed/failed route never gets this privilege.
+    if self.Computing
+        and #self.Waypoints > 0
+        and self.WaypointIndex
+            <= #self.Waypoints
+        and self.CachedSafeDirection.Magnitude
+            > 0
+    then
+        return self.CachedSafeDirection
+    end
+
+    if not self.Computing then
+        self:RequestPath(
+            goal,
+            true
+        )
+    end
+
+    -- Tiny final approach is safe without PFS.
+    if goalDelta.Magnitude
+        <= 10
+    then
+        local direction =
+            unit(
+                goalDelta
+            )
+
+        self.CachedSafeDirection =
+            direction
+
+        return direction
+    end
+
+    -- No live waypoint = no movement. Never return stale cached steering here.
+    self.CachedSafeDirection =
+        Vector3.zero
+
+    return Vector3.zero
+end
+
+function RoutePlanner:GetSafeDirection(
+    goal,
+    targetYaw,
+    reachDistance
+)
+    -- No wall-follow, no route-angle rescoring, no edge-ring veto.
+    -- Progression checkpoints can supply a tighter arrival radius than ordinary
+    -- path goals so the route does not stop just outside the physical trigger.
+    return self:GetRawDirection(
+        goal,
+        reachDistance
+    )
+end
+
+
+local DodgeSolver = {}
+DodgeSolver.__index = DodgeSolver
+
+function DodgeSolver.new(characterService, hazards, geometry, dungeon)
+    return setmetatable({
+        CharacterService = characterService,
+        Hazards = hazards,
+        Geometry = geometry,
+        Dungeon = dungeon,
+
+        LastSolve = 0,
+        CachedDirection = Vector3.zero,
+        CachedYaw = 0,
+        CachedEmergency = false,
+        CachedDodging = false,
+
+        LastMovement = Vector3.zero,
+        OrbitSign = 1,
+        LastOrbitFlip = 0,
+        IsDodging = false,
+        MeleePanicActive = false,
+        TravelMode = true,
+        TravelExitCandidateSince = 0,
+        CooldownHold = false,
+        ForceRouteMovement = false,
+        ForcedRegionPart = nil,
+        ControllerMode = "Anti Aggro",
+        GatherPhase = "Sweep",
+    }, DodgeSolver)
+end
+
+function DodgeSolver:IsPointInsideForcedRegion(
+    position
+)
+    local part =
+        self.ForcedRegionPart
+
+    if not part
+        or not part.Parent
+        or not part:IsA("BasePart")
+    then
+        return false
+    end
+
+    local localPoint =
+        part.CFrame:
+        PointToObjectSpace(
+            position
+        )
+
+    local inset =
+        math.min(
+            CONFIG.GolemForcedRegionInset,
+            math.min(
+                part.Size.X,
+                part.Size.Z
+            ) * 0.18
+        )
+
+    local halfX =
+        math.max(
+            part.Size.X * 0.5 - inset,
+            part.Size.X * 0.25
+        )
+
+    local halfZ =
+        math.max(
+            part.Size.Z * 0.5 - inset,
+            part.Size.Z * 0.25
+        )
+
+    return math.abs(
+        localPoint.X
+    ) <= halfX
+        and math.abs(
+            localPoint.Z
+        ) <= halfZ
+end
+
+function DodgeSolver:HasCrystalGolemFollowOrb()
+    for _, data in ipairs(
+        self.Hazards:GetActive()
+    ) do
+        local part =
+            data.Part
+
+        if part
+            and part.Parent
+        then
+            local container =
+                data.Container
+                or self.Hazards:
+                    GetContainer(
+                        part
+                    )
+
+            if container
+                and string.lower(
+                    container.Name or ""
+                ) == "enchantedfirstbossfolloworb"
+            then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+function DodgeSolver:GetCrystalGolemSweeperThreatPart()
+    if not self.CharacterService:IsAlive()
+    then
+        return nil
+    end
+
+    local model =
+        Workspace:
+        FindFirstChild(
+            "firstBossSpinningRockHitbox"
+        )
+
+    if not model then
+        return nil
+    end
+
+    local root =
+        self.CharacterService.Root
+
+    local bestPart =
+        nil
+
+    local bestPerpendicular =
+        math.huge
+
+    for _, part in ipairs(
+        model:GetDescendants()
+    ) do
+        if part:IsA("BasePart")
+            and string.lower(
+                part.Name or ""
+            ) == "hitbox"
+        then
+            local localPoint =
+                part.CFrame:
+                PointToObjectSpace(
+                    root.Position
+                )
+
+            local thinIsX =
+                part.Size.X
+                <= part.Size.Z
+
+            local thinCoord =
+                thinIsX
+                and localPoint.X
+                or localPoint.Z
+
+            local longCoord =
+                thinIsX
+                and localPoint.Z
+                or localPoint.X
+
+            local thinHalf =
+                (
+                    thinIsX
+                    and part.Size.X
+                    or part.Size.Z
+                ) * 0.5
+
+            local longHalf =
+                (
+                    thinIsX
+                    and part.Size.Z
+                    or part.Size.X
+                ) * 0.5
+
+            local insideHeight =
+                math.abs(
+                    localPoint.Y
+                ) <= part.Size.Y * 0.5 + 5
+
+            local insideSweepLength =
+                math.abs(
+                    longCoord
+                ) <= longHalf
+                    + CONFIG.GolemSweeperEndpointPadding
+
+            local perpendicularDistance =
+                math.max(
+                    0,
+                    math.abs(
+                        thinCoord
+                    ) - thinHalf
+                )
+
+            if insideHeight
+                and insideSweepLength
+                and perpendicularDistance
+                    <= CONFIG.GolemSweeperLeadDistance
+                and perpendicularDistance
+                    < bestPerpendicular
+            then
+                bestPerpendicular =
+                    perpendicularDistance
+
+                bestPart =
+                    part
+            end
+        end
+    end
+
+    return bestPart
+end
+
+function DodgeSolver:GetCrystalGolemSweeperEscape(
+    enemy,
+    targetYaw
+)
+    if not enemy
+        or not enemy.Model
+        or not enemy.Root
+        or not enemy.Root.Parent
+        or normalizeEnemyName(
+            enemy.Model.Name
+        ) ~= "crystal golem"
+    then
+        return nil
+    end
+
+    local threatPart =
+        self:
+        GetCrystalGolemSweeperThreatPart()
+
+    if not threatPart then
+        return nil
+    end
+
+    local root =
+        self.CharacterService.Root
+
+    local radial =
+        unit(
+            flatten(
+                root.Position
+                - enemy.Root.Position
+            )
+        )
+
+    if radial.Magnitude <= 0 then
+        return nil
+    end
+
+    -- Same counter-clockwise direction used by the normal Golem orbit.
+    local counterClockwise =
+        unit(
+            Vector3.new(
+                -radial.Z,
+                0,
+                radial.X
+            )
+        )
+
+    local bestDirection =
+        nil
+
+    local bestScore =
+        -math.huge
+
+    for _, angle in ipairs({
+        0,
+        15,
+        -15,
+        30,
+        -30,
+        50,
+        -50,
+        80,
+        -80,
+        110,
+        -110,
+    }) do
+        local direction =
+            unit(
+                rotateXZ(
+                    counterClockwise,
+                    angle
+                )
+            )
+
+        local score =
+            self:ScoreCandidate(
+                direction,
+                counterClockwise,
+                targetYaw
+            )
+
+        if score then
+            local future =
+                root.Position
+                + direction * 7
+
+            local localFuture =
+                threatPart.CFrame:
+                PointToObjectSpace(
+                    future
+                )
+
+            local thinIsX =
+                threatPart.Size.X
+                <= threatPart.Size.Z
+
+            local futureThin =
+                math.abs(
+                    thinIsX
+                    and localFuture.X
+                    or localFuture.Z
+                )
+
+            -- Prefer staying with the required CCW rotation while opening
+            -- perpendicular space from the incoming thin sweeper plane.
+            score +=
+                direction:Dot(
+                    counterClockwise
+                ) * 220
+
+            score +=
+                futureThin * 8
+
+            if score
+                > bestScore
+            then
+                bestScore =
+                    score
+
+                bestDirection =
+                    direction
+            end
+        end
+    end
+
+    if bestDirection then
+        return bestDirection,
+            targetYaw,
+            false
+    end
+
+    return nil
+end
+
+
+function DodgeSolver:IsMeleeEnemy(enemy)
+    return getEnemyThreatClass(
+        enemy
+    ) ~= nil
+end
+
+function DodgeSolver:GetSafeOrbitTangent(toward, targetYaw)
+    local root = self.CharacterService.Root
+    local baseTangent = Vector3.new(-toward.Z, 0, toward.X)
+
+    local right = unit(baseTangent)
+    local left = -right
+
+    local function sideSafe(direction)
+        local endpoint = root.Position + direction * 7
+        return self.Geometry:IsDirectionClear(direction, 7, targetYaw)
+            and self.Geometry:IsGroundPadded(endpoint, CONFIG.EdgeHardPadding)
+    end
+
+    local rightSafe = sideSafe(right)
+    local leftSafe = sideSafe(left)
+
+    local desired = self.OrbitSign >= 0 and right or left
+    local desiredSafe = self.OrbitSign >= 0 and rightSafe or leftSafe
+    local opposite = self.OrbitSign >= 0 and left or right
+    local oppositeSafe = self.OrbitSign >= 0 and leftSafe or rightSafe
+
+    if not desiredSafe and oppositeSafe then
+        self.OrbitSign = -self.OrbitSign
+        self.LastOrbitFlip = os.clock()
+        return opposite
+    end
+
+    if desiredSafe then
+        return desired
+    end
+
+    if oppositeSafe then
+        self.OrbitSign = -self.OrbitSign
+        self.LastOrbitFlip = os.clock()
+        return opposite
+    end
+
+    return desired
+end
+
+function DodgeSolver:GetNearestLiveEnemyDistance()
+    if not self.CharacterService:IsAlive() then
+        return math.huge
+    end
+
+    local root =
+        self.CharacterService.Root
+
+    local nearest =
+        math.huge
+
+    local enemies =
+        self.Dungeon:GetAliveEnemies()
+
+    for _, candidate in ipairs(enemies) do
+        if candidate
+            and candidate.Root
+            and candidate.Root.Parent
+            and candidate.Humanoid
+            and candidate.Humanoid.Health > 0
+        then
+            local distance =
+                flatten(
+                    candidate.Root.Position
+                    - root.Position
+                ).Magnitude
+
+            if distance < nearest then
+                nearest = distance
+            end
+        end
+    end
+
+    return nearest
+end
+
+function DodgeSolver:UpdateNavigationMode(
+    routeDirection,
+    enemy,
+    targetYaw
+)
+    local nearestDistance =
+        self:GetNearestLiveEnemyDistance()
+
+    -- Far from every live enemy = navigation, unconditionally.
+    if nearestDistance
+        > CONFIG.NavigationEnterDistance
+    then
+        self.TravelMode = true
+        self.TravelExitCandidateSince = 0
+        return true
+    end
+
+    -- Between the enter/exit thresholds, preserve the previous mode. This is the
+    -- hysteresis band that prevents NAVIGATION <-> APPROACH flicker.
+    if nearestDistance
+        > CONFIG.NavigationExitDistance
+    then
+        self.TravelExitCandidateSince = 0
+        return self.TravelMode
+    end
+
+    if not enemy
+        or not enemy.Root
+        or not enemy.Root.Parent
+    then
+        self.TravelMode = true
+        self.TravelExitCandidateSince = 0
+        return true
+    end
+
+    routeDirection =
+        unit(
+            flatten(
+                routeDirection
+            )
+        )
+
+    -- A transient zero route during repathing must NEVER kick UIW out of
+    -- navigation. Keep the previous travel state until a real route returns.
+    if routeDirection.Magnitude <= 0 then
+        self.TravelExitCandidateSince = 0
+        return self.TravelMode
+    end
+
+    local root =
+        self.CharacterService.Root
+
+    local toEnemy =
+        flatten(
+            enemy.Root.Position
+            - root.Position
+        )
+
+    local toward =
+        unit(
+            toEnemy
+        )
+
+    if toward.Magnitude <= 0 then
+        self.TravelMode = true
+        self.TravelExitCandidateSince = 0
+        return true
+    end
+
+    local routeDot =
+        routeDirection:Dot(
+            toward
+        )
+
+    local probeDistance =
+        math.min(
+            toEnemy.Magnitude,
+            CONFIG.TravelDirectProbeDistance
+        )
+
+    local directClear =
+        self.Geometry:
+        IsDirectionClear(
+            toward,
+            probeDistance,
+            targetYaw
+        )
+
+    -- Still making a real dungeon detour: navigation remains authoritative even
+    -- if the enemy is geometrically nearby through a wall/floor.
+    if not directClear
+        or routeDot
+            < CONFIG.TravelRouteDetourDot
+    then
+        self.TravelMode = true
+        self.TravelExitCandidateSince = 0
+        return true
+    end
+
+    -- Only exit navigation after the close + direct condition remains stable for
+    -- a short period. One good frame is not enough.
+    local now =
+        os.clock()
+
+    if self.TravelMode then
+        if self.TravelExitCandidateSince <= 0 then
+            self.TravelExitCandidateSince =
+                now
+
+            return true
+        end
+
+        if now
+            - self.TravelExitCandidateSince
+            < CONFIG.NavigationExitConfirmTime
+        then
+            return true
+        end
+    end
+
+    self.TravelMode = false
+    self.TravelExitCandidateSince = 0
+    return false
+end
+
+function DodgeSolver:GetCombatPreferred(routeDirection, enemy, targetYaw)
+    routeDirection =
+        unit(
+            flatten(
+                routeDirection
+            )
+        )
+
+    if self.ForceRouteMovement then
+        return routeDirection
+    end
+
+    local navigating =
+        self:UpdateNavigationMode(
+            routeDirection,
+            enemy,
+            targetYaw
+        )
+
+    -- A nearby melee/proximity target must override TravelMode. Previously a
+    -- detour/direct-probe failure could leave TravelMode latched and drive the
+    -- route straight into a Mushroom Spearman even at ~51 studs.
+    local meleeTravelOverride =
+        false
+
+    if navigating
+        and enemy
+        and enemy.Root
+        and enemy.Root.Parent
+    then
+        local threatClass =
+            getEnemyThreatClass(
+                enemy
+            )
+
+        if threatClass then
+            local distance =
+                flatten(
+                    enemy.Root.Position
+                    - self.CharacterService.Root.Position
+                ).Magnitude
+
+            local overrideDistance =
+                CONFIG.MeleeTravelOverrideDistance
+
+            if threatClass
+                == "Proximity"
+            then
+                overrideDistance +=
+                    CONFIG.ProximitySafetyBonus
+            end
+
+            if distance
+                <= overrideDistance
+            then
+                meleeTravelOverride =
+                    true
+
+                self.TravelMode =
+                    false
+
+                self.TravelExitCandidateSince =
+                    0
+            end
+        end
+    end
+
+    -- Navigation is the default when not close to enemies. Combat attraction,
+    -- strafing, and orbiting are not allowed to pull UIW off the dungeon route.
+    if navigating
+        and not meleeTravelOverride
+    then
+        return routeDirection
+    end
+
+    if not enemy
+        or not enemy.Root
+        or not enemy.Root.Parent
+    then
+        return routeDirection
+    end
+
+    local root =
+        self.CharacterService.Root
+
+    local toEnemy =
+        flatten(
+            enemy.Root.Position
+            - root.Position
+        )
+
+    local distance =
+        toEnemy.Magnitude
+
+    local toward =
+        unit(
+            toEnemy
+        )
+
+    if toward.Magnitude <= 0 then
+        return routeDirection
+    end
+
+    local enemyName =
+        enemy
+        and enemy.Model
+        and normalizeEnemyName(
+            enemy.Model.Name
+        )
+        or ""
+
+    local crystalGolem =
+        enemyName
+        == "crystal golem"
+
+    if self.CooldownHold
+        and not crystalGolem
+    then
+        return Vector3.zero
+    end
+
+    local tangent =
+        self:GetSafeOrbitTangent(
+            toward,
+            targetYaw
+        )
+
+    if crystalGolem then
+        -- `toward` points player -> boss. For a boss-centered radial vector
+        -- (boss -> player), this is the counter-clockwise tangent in X/Z.
+        local counterClockwise =
+            unit(
+                Vector3.new(
+                    toward.Z,
+                    0,
+                    -toward.X
+                )
+            )
+
+        if counterClockwise.Magnitude <= 0 then
+            counterClockwise =
+                tangent
+        end
+
+        local orbLive =
+            self:HasCrystalGolemFollowOrb()
+
+        if distance
+            > CONFIG.GolemOrbitOuter
+        then
+            return unit(
+                counterClockwise * 0.82
+                + toward * 0.72
+            )
+
+        elseif distance
+            < CONFIG.GolemOrbitInner
+        then
+            return unit(
+                counterClockwise * 1.05
+                - toward * 0.58
+            )
+
+        elseif orbLive then
+            return unit(
+                counterClockwise * 1.10
+                - toward
+                    * CONFIG.GolemOrbKiteBias
+            )
+
+        else
+            return counterClockwise
+        end
+    end
+
+    if self:IsMeleeEnemy(enemy) then
+        -- Always Moving is a forward pull mode. Melee spacing may strafe/orbit,
+        -- but it must never turn the pull into a backwards kite away from the room.
+        if self.ControllerMode == "Always Moving" then
+            local forward = routeDirection
+            if forward.Magnitude <= 0 then
+                forward = unit(flatten(self.CharacterService.Root.CFrame.LookVector))
+            end
+
+            -- Pick the orbit side that preserves the most forward progress.
+            local otherTangent = -tangent
+            if otherTangent:Dot(forward) > tangent:Dot(forward) then
+                tangent = otherTangent
+            end
+
+            if distance > CONFIG.MeleeOrbitOuter then
+                return unit(
+                    forward * 1.00
+                    + toward * 0.62
+                    + tangent * 0.18
+                )
+            elseif distance > CONFIG.MeleeOrbitInner then
+                return unit(
+                    forward * 0.92
+                    + tangent * 0.72
+                    + toward * 0.12
+                )
+            else
+                -- Inside melee range, slide around the mob while continuing down-route.
+                -- Do not add any -toward component here.
+                return unit(
+                    forward * 0.82
+                    + tangent * 1.00
+                )
+            end
+        end
+
+        if distance
+            > CONFIG.MeleeOrbitOuter
+        then
+            return unit(
+                toward * 1.02
+                + routeDirection * 0.72
+                + tangent * 0.22
+            )
+
+        elseif distance
+            > CONFIG.MeleeOrbitInner
+        then
+            return unit(
+                tangent * 0.92
+                + toward * 0.30
+                + routeDirection * 0.34
+            )
+
+        elseif distance
+            > CONFIG.MeleeEmergencyRadius
+        then
+            return unit(
+                tangent * 1.00
+                - toward * 0.22
+                + routeDirection * 0.22
+            )
+
+        else
+            return unit(
+                tangent * 1.00
+                - toward * 0.70
+                + routeDirection * 0.10
+            )
+        end
+    end
+
+    if distance
+        < CONFIG.MinimumCombatRange
+    then
+        return unit(
+            -toward * 0.72
+            + tangent * 0.95
+            + routeDirection * 0.14
+        )
+
+    elseif distance
+        > CONFIG.AggressiveApproachDistance
+    then
+        return unit(
+            toward * 1.00
+            + routeDirection * 0.82
+            + tangent * 0.06
+        )
+
+    elseif distance
+        > CONFIG.DesiredCombatRange
+    then
+        return unit(
+            toward * 0.82
+            + routeDirection * 0.70
+            + tangent * 0.12
+        )
+
+    else
+        return unit(
+            tangent * 0.82
+            + routeDirection * 0.42
+            + toward * 0.18
+        )
+    end
+end
+
+function DodgeSolver:GetMeleePenalty(position)
+    local penalty = 0
+
+    for _, info in ipairs(
+        self.Dungeon:
+        GetMeleeThreats(
+            position,
+            55
+        )
+    ) do
+        local distance =
+            info.Distance
+
+        local safetyRadius =
+            CONFIG.MeleeSafetyRadius
+
+        local emergencyRadius =
+            CONFIG.MeleeEmergencyRadius
+
+        if info.ThreatClass
+            == "Proximity"
+        then
+            safetyRadius +=
+                CONFIG.ProximitySafetyBonus
+
+            emergencyRadius +=
+                CONFIG.ProximityEmergencyBonus
+        end
+
+        if distance
+            <= CONFIG.MeleeHardNoGoRadius
+        then
+            penalty += 12000
+
+        elseif distance
+            <= emergencyRadius
+        then
+            penalty +=
+                4000
+                + (
+                    emergencyRadius
+                    - distance
+                ) * 650
+
+        elseif distance
+            < safetyRadius
+        then
+            penalty +=
+                (
+                    safetyRadius
+                    - distance
+                ) * 400
+        end
+    end
+
+    return penalty
+end
+
+function DodgeSolver:GetEnchantedForestLineEscapeBonus(
+    direction
+)
+    local root =
+        self.CharacterService.Root
+
+    if not root then
+        return 0
+    end
+
+    local bestBonus =
+        0
+
+    for _, data in ipairs(
+        self.Hazards:GetActive()
+    ) do
+        local part =
+            data.Part
+
+        if part
+            and part.Parent
+        then
+            local container =
+                data.Container
+                or self.Hazards:
+                    GetContainer(
+                        part
+                    )
+
+            local containerName =
+                container
+                and string.lower(
+                    container.Name or ""
+                )
+                or ""
+
+            if containerName
+                == "mushroomwizardshot"
+            then
+                local size =
+                    part.Size
+
+                local longest =
+                    math.max(
+                        size.X,
+                        size.Z
+                    )
+
+                local shortest =
+                    math.min(
+                        size.X,
+                        size.Z
+                    )
+
+                if longest >= 45
+                    and shortest <= 12
+                then
+                    local longAxis
+
+                    if size.X >= size.Z then
+                        longAxis =
+                            flatten(
+                                part.CFrame.RightVector
+                            )
+                    else
+                        longAxis =
+                            flatten(
+                                part.CFrame.LookVector
+                            )
+                    end
+
+                    longAxis =
+                        unit(
+                            longAxis
+                        )
+
+                    -- A line attack is escaped fastest by moving perpendicular
+                    -- to its long axis. This is only a scoring bonus; all normal
+                    -- body/hazard/geometry safety checks still run first.
+                    local perpendicularity =
+                        1
+                        - math.abs(
+                            direction:Dot(
+                                longAxis
+                            )
+                        )
+
+                    bestBonus =
+                        math.max(
+                            bestBonus,
+                            perpendicularity * 180
+                        )
+                end
+            end
+        end
+    end
+
+    return bestBonus
+end
+
+function DodgeSolver:ScoreCandidate(direction, preferred, yaw)
+    local rootPosition = self.CharacterService.Root.Position
+    direction = unit(flatten(direction))
+
+    local clear = self.Geometry:IsDirectionClear(
+        direction,
+        CONFIG.DodgeDistance,
+        yaw
+    )
+    if not clear then
+        return nil
+    end
+
+    local future = rootPosition + direction * math.min(7, CONFIG.DodgeDistance)
+
+    if self.ForcedRegionPart
+        and self:IsPointInsideForcedRegion(
+            rootPosition
+        )
+        and not self:IsPointInsideForcedRegion(
+            future
+        )
+    then
+        return nil
+    end
+
+    if not self.Geometry:IsGroundPadded(future, CONFIG.EdgeHardPadding) then
+        return nil
+    end
+
+    local bodyClear = self.Hazards:IsTrajectoryClear(
+        rootPosition,
+        direction,
+        yaw,
+        CONFIG.DodgeDistance
+    )
+
+    if not bodyClear then
+        return nil
+    end
+
+    if not self.Hazards:
+        IsPredictiveTrajectoryClear(
+            rootPosition,
+            direction,
+            yaw,
+            CONFIG.DodgeDistance
+        )
+    then
+        return nil
+    end
+
+    local warningDistance = math.max(CONFIG.DodgeDistance,
+        math.min(CONFIG.WalkSpeed,self.CharacterService.Humanoid.WalkSpeed)*CONFIG.PrecastLookaheadTime)
+    if not self.Hazards:IsPrecastTrajectoryClear(rootPosition,direction,yaw,warningDistance) then return nil end
+
+    local score = direction:Dot(preferred) * 130
+
+    score -= self.Hazards:GetTrajectoryThreat(
+        rootPosition,
+        direction,
+        CONFIG.DodgeDistance
+    ) * 3
+
+    score +=
+        self:GetEnchantedForestLineEscapeBonus(
+            direction
+        )
+
+    score -= self:GetMeleePenalty(future)
+    score += self.Geometry:GetEdgeClearanceScore(future) * 22
+
+    -- Prefer dodge lanes with real surrounding room, not just a technically
+    -- collision-free center line. This keeps UIW away from walls, corners,
+    -- ledges and narrow funnels while preserving all hazard checks above.
+    local mapScore = self.Geometry:GetDodgeMapScore(
+        rootPosition,
+        direction,
+        yaw
+    )
+    if mapScore == -math.huge then
+        return nil
+    end
+    score += mapScore
+
+    if self.LastMovement.Magnitude > 0 then
+        score += direction:Dot(self.LastMovement) * 12
+    end
+
+    return score
+end
+
+function DodgeSolver:FindNormalDodge(preferred, targetYaw)
+    local bestDirection = nil
+    local bestScore = -math.huge
+
+    for _, angle in ipairs(CONFIG.DodgeAngles) do
+        local direction = unit(rotateXZ(preferred, angle))
+        local score = self:ScoreCandidate(direction, preferred, targetYaw)
+
+        if score and score > bestScore then
+            bestScore = score
+            bestDirection = direction
+        end
+    end
+
+    if bestDirection then
+        return bestDirection, targetYaw, false
+    end
+
+    return nil
+end
+
+function DodgeSolver:FindEmergencyOrientation(preferred, targetYaw)
+    local bestDirection = nil
+    local bestYaw = nil
+    local bestScore = -math.huge
+
+    for _, angle in ipairs(CONFIG.DodgeAngles) do
+        local direction = unit(rotateXZ(preferred, angle))
+        local movementYaw = directionToYaw(direction)
+
+        for _, yawOffset in ipairs(CONFIG.EmergencyBodyYawOffsets) do
+            local yaw = movementYaw + math.rad(yawOffset)
+            local score = self:ScoreCandidate(direction, preferred, yaw)
+
+            if score then
+                score -= math.abs(angleDifference(yaw, targetYaw)) * 8
+
+                if score > bestScore then
+                    bestScore = score
+                    bestDirection = direction
+                    bestYaw = yaw
+                end
+            end
+        end
+    end
+
+    if bestDirection then
+        return bestDirection, bestYaw, true
+    end
+
+    return nil
+end
+
+function DodgeSolver:GetActiveHitboxEscape(targetYaw)
+    local root = self.CharacterService.Root
+    local overlaps =
+        self.Hazards:GetCurrentOverlaps(
+            targetYaw
+        )
+
+    local currentOverlapCount =
+        #overlaps
+
+    if currentOverlapCount == 0 then
+        return nil
+    end
+
+    -- Build a cheap first-choice escape direction from the nearest horizontal face
+    -- of every box currently containing the body. This replaces the previous
+    -- 20-directions x 13-yaws x 3-overlap-samples brute force.
+    local escape = Vector3.zero
+
+    for _, part in ipairs(overlaps) do
+        if part and part.Parent then
+            local warningExit = self.Hazards:GetWarningExitDirection(part,root.Position)
+            if warningExit then
+                escape += warningExit
+                continue
+            end
+            local localPoint =
+                part.CFrame:
+                PointToObjectSpace(
+                    root.Position
+                )
+
+            local half =
+                part.Size * 0.5
+
+            local xExit =
+                half.X - math.abs(localPoint.X)
+
+            local zExit =
+                half.Z - math.abs(localPoint.Z)
+
+            local localDirection
+
+            if xExit < zExit then
+                localDirection =
+                    Vector3.new(
+                        localPoint.X >= 0 and 1 or -1,
+                        0,
+                        0
+                    )
+            else
+                localDirection =
+                    Vector3.new(
+                        0,
+                        0,
+                        localPoint.Z >= 0 and 1 or -1
+                    )
+            end
+
+            local worldDirection =
+                flatten(
+                    part.CFrame:
+                    VectorToWorldSpace(
+                        localDirection
+                    )
+                )
+
+            if worldDirection.Magnitude > 0 then
+                escape += unit(worldDirection)
+            end
+        end
+    end
+
+    escape = unit(escape)
+
+    if escape.Magnitude <= 0 then
+        escape =
+            unit(
+                flatten(
+                    root.CFrame.LookVector
+                )
+            )
+    end
+
+    local directions = {
+        escape,
+        unit(rotateXZ(escape, 25)),
+        unit(rotateXZ(escape, -25)),
+        unit(rotateXZ(escape, 50)),
+        unit(rotateXZ(escape, -50)),
+        unit(rotateXZ(escape, 90)),
+        unit(rotateXZ(escape, -90)),
+        -escape,
+    }
+
+    local bestDirection = nil
+    local bestYaw = nil
+    local bestScore = -math.huge
+
+    for _, direction in ipairs(directions) do
+        if direction.Magnitude > 0 then
+            local movementYaw =
+                directionToYaw(direction)
+
+            local yawCandidates = {
+                targetYaw,
+                movementYaw,
+                movementYaw + math.rad(90),
+                movementYaw - math.rad(90),
+            }
+
+            for _, yaw in ipairs(yawCandidates) do
+                local geometryClear =
+                    self.Geometry:
+                    IsDirectionClear(
+                        direction,
+                        4,
+                        yaw
+                    )
+
+                if geometryClear then
+                    local future4 =
+                        root.Position
+                        + direction * 4
+
+                    local future7 =
+                        root.Position
+                        + direction * 7
+
+                    if self.Geometry:IsGroundPadded(
+                        future7,
+                        CONFIG.EdgeHardPadding
+                    ) then
+                        local count4 =
+                            self.Hazards:
+                            GetOverlapCountAt(
+                                future4,
+                                yaw
+                            )
+
+                        local count7 =
+                            self.Hazards:
+                            GetOverlapCountAt(
+                                future7,
+                                yaw
+                            )
+
+                        local score =
+                            (currentOverlapCount - count4)
+                                * 420
+                            + (currentOverlapCount - count7)
+                                * 760
+
+                        if count7 == 0 then
+                            score += 1800
+                        end
+
+                        score +=
+                            self.Geometry:
+                            GetEdgeClearanceScore(
+                                future7
+                            )
+                            * 18
+
+                        score += self.Geometry:GetDodgeMapScore(
+                            root.Position,
+                            direction,
+                            yaw
+                        ) * 0.55
+
+                        -- Prefer a stable exit instead of repeatedly rotating the body.
+                        score -=
+                            math.abs(
+                                angleDifference(
+                                    yaw,
+                                    targetYaw
+                                )
+                            )
+                            * 3
+
+                        if score > bestScore then
+                            bestScore = score
+                            bestDirection = direction
+                            bestYaw = yaw
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if bestDirection then
+        return bestDirection, bestYaw, true
+    end
+
+    return nil
+end
+
+function DodgeSolver:GetAlwaysMovingPackWrap(routeDirection, targetYaw)
+    local controller = self.Controller
+    if not controller or controller.Mode ~= "Always Moving" then
+        return nil
+    end
+
+    local root = self.CharacterService.Root
+    if not root then
+        return nil
+    end
+
+    local threats = self.Dungeon:GetMeleeThreats(
+        root.Position,
+        math.max(CONFIG.MultiMeleeRadius, CONFIG.AlwaysMoveWrapRadius)
+    )
+
+    if #threats < CONFIG.AlwaysMoveWrapTriggerCount then
+        return nil
+    end
+
+    local cluster = Vector3.zero
+    local closeCount = 0
+    for _, info in ipairs(threats) do
+        if info.Enemy and info.Enemy.Root and info.Enemy.Root.Parent
+            and info.Distance <= CONFIG.AlwaysMoveWrapRadius
+        then
+            cluster += info.Enemy.Root.Position
+            closeCount += 1
+        end
+    end
+
+    if closeCount < CONFIG.AlwaysMoveWrapTriggerCount then
+        return nil
+    end
+
+    cluster /= closeCount
+    local fromCluster = flatten(root.Position - cluster)
+    local radius = fromCluster.Magnitude
+    local outward = unit(fromCluster)
+    if outward.Magnitude <= 0 then
+        outward = unit(flatten(root.CFrame.LookVector))
+    end
+
+    local tangentA = unit(Vector3.new(-outward.Z, 0, outward.X))
+    local tangentB = -tangentA
+    local forward = unit(flatten(routeDirection))
+    if forward.Magnitude <= 0 then
+        local current = controller.CurrentEnemy
+        if current and current.Root and current.Root.Parent then
+            forward = unit(flatten(current.Root.Position - root.Position))
+        end
+    end
+
+    local preferredSign = controller.AlwaysMoveWrapSign or 0
+
+    local function makeCandidate(tangent, sign)
+        local radial
+        local tangential
+        local forwardBias
+
+        if radius < CONFIG.AlwaysMoveOrbitInnerRadius then
+            -- Deep inside the pack: escape radially first. No forward pressure until
+            -- we have re-established a safe orbit radius.
+            radial = 1.55
+            tangential = 0.72
+            forwardBias = 0.00
+        elseif radius < CONFIG.AlwaysMoveOrbitTargetRadius then
+            radial = 0.72
+            tangential = 1.15
+            forwardBias = 0.08
+        elseif radius <= CONFIG.AlwaysMoveOrbitOuterRadius then
+            radial = 0.18
+            tangential = 1.28
+            forwardBias = CONFIG.AlwaysMoveWrapForwardBias
+        else
+            -- Too far outside: curve gently back toward the target ring.
+            radial = -0.18
+            tangential = 1.22
+            forwardBias = CONFIG.AlwaysMoveWrapForwardBias
+        end
+
+        local dir = unit(
+            tangent * tangential
+            + outward * radial
+            + forward * forwardBias
+        )
+        if dir.Magnitude <= 0 then
+            return nil, -math.huge
+        end
+
+        local toCluster = -outward
+        local inwardDot = dir:Dot(toCluster)
+        if radius < CONFIG.AlwaysMoveOrbitTargetRadius and inwardDot > 0 then
+            dir = unit(dir - toCluster * (inwardDot + 0.16))
+        end
+
+        local future = root.Position + dir * CONFIG.AlwaysMoveOrbitRadialLookahead
+        if not self.Geometry:IsDirectionClear(
+            dir,
+            CONFIG.AlwaysMoveOrbitRadialLookahead,
+            targetYaw
+        ) then
+            return nil, -math.huge
+        end
+        if not self.Geometry:IsGroundPadded(future, CONFIG.EdgeHardPadding) then
+            return nil, -math.huge
+        end
+        if not self.Hazards:IsTrajectoryClear(
+            root.Position,
+            dir,
+            targetYaw,
+            CONFIG.AlwaysMoveOrbitRadialLookahead
+        ) then
+            return nil, -math.huge
+        end
+
+        local futureRadius = flatten(future - cluster).Magnitude
+        local score = 0
+
+        if radius < CONFIG.AlwaysMoveOrbitInnerRadius then
+            score += (futureRadius - radius) * 650
+            if futureRadius < radius + 1.5 then
+                score -= 5000
+            end
+        else
+            score -= math.abs(futureRadius - CONFIG.AlwaysMoveOrbitTargetRadius) * 95
+            score += (forward.Magnitude > 0 and dir:Dot(forward) or 0) * 90
+        end
+
+        if preferredSign ~= 0 then
+            score += (sign == preferredSign) and 180 or -180
+        end
+
+        score += self.Geometry:GetEdgeClearanceScore(future) * 18
+        return dir, score
+    end
+
+    local a, scoreA = makeCandidate(tangentA, 1)
+    local b, scoreB = makeCandidate(tangentB, -1)
+
+    local best, sign
+    if scoreA >= scoreB then
+        best, sign = a, 1
+    else
+        best, sign = b, -1
+    end
+
+    if best then
+        controller.AlwaysMoveWrapSign = sign
+        return best, targetYaw, false
+    end
+
+    -- If the preferred side is blocked, forget the lock so the next solve may swap.
+    controller.AlwaysMoveWrapSign = nil
+    return nil
+end
+
+function DodgeSolver:GetMeleePanicEscape(targetYaw, routeDirection)
+    local root = self.CharacterService.Root
+    local threats = self.Dungeon:GetMeleeThreats(
+        root.Position,
+        CONFIG.MultiMeleeRadius
+    )
+
+    if #threats == 0 then
+        self.MeleePanicActive = false
+        return nil
+    end
+
+    local nearest = math.huge
+    local nearestEmergencyRadius =
+        CONFIG.MeleeEmergencyRadius
+
+    local closeCount = 0
+    local clusterCenter = Vector3.zero
+
+    for _, info in ipairs(threats) do
+        nearest =
+            math.min(
+                nearest,
+                info.Distance
+            )
+
+        local emergencyRadius =
+            CONFIG.MeleeEmergencyRadius
+
+        local clusterRadius =
+            CONFIG.MeleeClusterPanicRadius
+
+        if info.ThreatClass
+            == "Proximity"
+        then
+            emergencyRadius +=
+                CONFIG.ProximityEmergencyBonus
+
+            clusterRadius +=
+                CONFIG.ProximitySafetyBonus
+        end
+
+        if info.Distance
+            <= emergencyRadius
+        then
+            nearestEmergencyRadius =
+                math.max(
+                    nearestEmergencyRadius,
+                    emergencyRadius
+                )
+        end
+
+        if info.Distance
+            <= clusterRadius
+        then
+            closeCount += 1
+        end
+
+        clusterCenter +=
+            info.Enemy.Root.Position
+    end
+
+    if not self.MeleePanicActive then
+        if nearest
+                <= nearestEmergencyRadius
+            or closeCount
+                >= CONFIG.MeleeClusterPanicCount
+        then
+            self.MeleePanicActive =
+                true
+        else
+            return nil
+        end
+
+    elseif nearest
+            >= (
+                CONFIG.MeleePanicExitRadius
+                + CONFIG.ProximityEmergencyBonus
+            )
+        and closeCount == 0
+    then
+        self.MeleePanicActive = false
+        return nil
+    end
+
+    clusterCenter /= #threats
+
+    local away = unit(flatten(root.Position - clusterCenter))
+    if away.Magnitude <= 0 then
+        away = unit(flatten(root.CFrame.LookVector))
+    end
+
+    local towardCluster = -away
+    local orbit = self:GetSafeOrbitTangent(towardCluster, targetYaw)
+    routeDirection = unit(flatten(routeDirection))
+
+    local currentMin = math.huge
+    for _, info in ipairs(threats) do
+        currentMin = math.min(currentMin, info.Distance)
+    end
+
+    local bestDirection = nil
+    local bestScore = -math.huge
+
+    -- Full sector search around the cluster. In Always Moving, melee panic is
+    -- converted into a forward/lateral slip instead of an away-from-pack retreat.
+    local alwaysMoving = self.ControllerMode == "Always Moving"
+    local angleSet = alwaysMoving
+        and {0, 18, -18, 35, -35, 55, -55, 75, -75, 90, -90}
+        or {0, 20, -20, 40, -40, 60, -60, 80, -80, 100, -100, 125, -125, 150, -150, 180}
+
+    for _, angle in ipairs(angleSet) do
+        local base
+        if alwaysMoving then
+            local forward = routeDirection
+            if forward.Magnitude <= 0 then
+                forward = unit(flatten(root.CFrame.LookVector))
+            end
+            local side = orbit
+            if (-side):Dot(forward) > side:Dot(forward) then
+                side = -side
+            end
+            base = unit(forward * 1.10 + side * 0.80)
+        else
+            base = unit(away * 0.72 + orbit * 0.92)
+        end
+        local direction = unit(rotateXZ(base, angle))
+
+        -- Never let melee panic reverse the room sweep in Always Moving.
+        if alwaysMoving and routeDirection.Magnitude > 0
+            and direction:Dot(routeDirection) < 0.05
+        then
+            continue
+        end
+        local future = root.Position + direction * 10
+
+        if self.Geometry:IsDirectionClear(direction, 8, targetYaw)
+            and self.Geometry:IsGroundPadded(future, CONFIG.EdgeHardPadding)
+            and self.Hazards:IsTrajectoryClear(root.Position, direction, targetYaw, 8)
+        then
+            local futureMin = math.huge
+            local sumDistance = 0
+
+            local futureEmergencyViolation =
+                false
+
+            local futureHardViolation =
+                false
+
+            for _, info in ipairs(threats) do
+                local enemyRoot =
+                    info.Enemy.Root
+
+                local predictionTime =
+                    info.ThreatClass
+                        == "Proximity"
+                    and 0.42
+                    or 0.32
+
+                local predicted =
+                    enemyRoot.Position
+                    + flatten(
+                        enemyRoot.AssemblyLinearVelocity
+                    ) * predictionTime
+
+                local distance =
+                    flatten(
+                        predicted - future
+                    ).Magnitude
+
+                local emergencyRadius =
+                    CONFIG.MeleeEmergencyRadius
+                    + (
+                        info.ThreatClass
+                            == "Proximity"
+                        and CONFIG.ProximityEmergencyBonus
+                        or 0
+                    )
+
+                local hardRadius =
+                    CONFIG.MeleeHardNoGoRadius
+                    + (
+                        info.ThreatClass
+                            == "Proximity"
+                        and 3
+                        or 0
+                    )
+
+                futureMin =
+                    math.min(
+                        futureMin,
+                        distance
+                    )
+
+                sumDistance +=
+                    distance
+
+                if distance
+                    <= emergencyRadius
+                then
+                    futureEmergencyViolation =
+                        true
+                end
+
+                if distance
+                    <= hardRadius
+                then
+                    futureHardViolation =
+                        true
+                end
+            end
+
+            local improvement = futureMin - currentMin
+            local routeDot = routeDirection.Magnitude > 0
+                and direction:Dot(routeDirection)
+                or 0
+            local orbitDot = direction:Dot(orbit)
+
+            local score
+            if alwaysMoving then
+                -- Forward progress dominates in pull mode; distance is still rewarded
+                -- enough to sidestep melee, but never enough to choose a backwards escape.
+                score = futureMin * 65
+                    + improvement * 65
+                    + sumDistance * 3
+                    + routeDot * 900
+                    + orbitDot * 85
+                    + self.Geometry:GetEdgeClearanceScore(future) * 22
+            else
+                score = futureMin * 170
+                    + improvement * 300
+                    + sumDistance * 8
+                    + routeDot * 75
+                    + orbitDot * 40
+                    + self.Geometry:GetEdgeClearanceScore(future) * 22
+            end
+
+            if futureHardViolation then
+                score -= 12000
+
+            elseif futureEmergencyViolation then
+                score -= 4500
+            end
+
+            if improvement < 0.75 then
+                score -= 500
+            end
+
+            if not alwaysMoving and routeDot < -0.45 then
+                score -= 350
+            end
+
+            if score > bestScore then
+                bestScore = score
+                bestDirection = direction
+            end
+        end
+    end
+
+    if bestDirection then
+        return bestDirection, targetYaw, false
+    end
+
+    -- If every long candidate is blocked, keep trying the locally safe orbit side
+    -- instead of freezing in melee range.
+    local shortOrbit = self:GetSafeOrbitTangent(towardCluster, targetYaw)
+    if shortOrbit.Magnitude > 0
+        and self.Geometry:IsDirectionClear(shortOrbit, 3, targetYaw)
+    then
+        return shortOrbit, targetYaw, false
+    end
+
+    return nil
+end
+
+function DodgeSolver:IsImmediateHazardDanger(
+    preferred,
+    targetYaw
+)
+    local root =
+        self.CharacterService.Root
+
+    if self.Hazards:
+        GetOverlapCountAt(
+            root.Position,
+            targetYaw
+        ) > 0
+    then
+        return true
+    end
+
+    preferred =
+        unit(
+            flatten(
+                preferred
+                or Vector3.zero
+            )
+        )
+
+    local warningDistance = math.max(CONFIG.DangerLookaheadDistance,
+        math.min(CONFIG.WalkSpeed,self.CharacterService.Humanoid.WalkSpeed)*CONFIG.PrecastLookaheadTime)
+    if not self.Hazards:IsPrecastTrajectoryClear(root.Position,preferred,targetYaw,warningDistance) then
+        return true
+    end
+
+    local incoming =
+        self.Hazards:
+        GetIncomingProjectileThreat(
+            root.Position,
+            preferred,
+            targetYaw,
+            CONFIG.DodgeDistance
+        )
+
+    if incoming then
+        return true
+    end
+
+    if #self.Hazards:GetActive()
+        == 0
+    then
+        return false
+    end
+
+    if preferred.Magnitude <= 0 then
+        return false
+    end
+
+    return not self.Hazards:
+        IsTrajectoryClear(
+            root.Position,
+            preferred,
+            targetYaw,
+            CONFIG.DangerLookaheadDistance
+        )
+end
+
+function DodgeSolver:FindOpenMovement(preferred, targetYaw)
+    local root = self.CharacterService.Root
+    preferred = unit(flatten(preferred))
+
+    if preferred.Magnitude <= 0 then
+        return Vector3.zero
+    end
+
+    local bestDirection = Vector3.zero
+    local bestScore = -math.huge
+
+    for _, angle in ipairs({0, 20, -20, 40, -40, 65, -65, 90, -90, 120, -120, 150, -150, 180}) do
+        local direction = unit(rotateXZ(preferred, angle))
+        local future = root.Position + direction * 6
+
+        if self.Geometry:IsDirectionClear(direction, 6, targetYaw)
+            and self.Geometry:IsGroundPadded(future, CONFIG.EdgeHardPadding)
+        then
+            local score = direction:Dot(preferred) * 150
+                + self.Geometry:GetDodgeMapScore(root.Position, direction, targetYaw)
+
+            if self.LastMovement.Magnitude > 0 then
+                score += direction:Dot(self.LastMovement) * 20
+            end
+
+            if score > bestScore then
+                bestScore = score
+                bestDirection = direction
+            end
+        end
+    end
+
+    return bestDirection
+end
+
+function DodgeSolver:Solve(routeDirection, enemy, targetYaw)
+    local now = os.clock()
+
+    if now - self.LastSolve < CONFIG.DodgeSolveInterval then
+        self.IsDodging = self.CachedDodging
+        return self.CachedDirection,
+            self.CachedYaw,
+            self.CachedEmergency,
+            self.CachedDodging
+    end
+
+    self.LastSolve = now
+
+    local direction, yaw, emergency
+    local dodging = false
+
+    -- 1) If the body is already in an attack, getting out has absolute priority.
+    direction, yaw, emergency = self:GetActiveHitboxEscape(targetYaw)
+    if direction then
+        dodging = true
+    end
+
+    -- 2) Crystal Golem's rotating rock/electric sweeper is only ~1 stud thick.
+    -- Start the counter-clockwise escape before the plane actually overlaps us.
+    if not direction then
+        direction, yaw, emergency =
+            self:GetCrystalGolemSweeperEscape(
+                enemy,
+                targetYaw
+            )
+
+        if direction then
+            dodging = true
+        end
+    end
+
+    -- 3) Always Moving wraps around dense melee packs instead of cutting through
+    -- the cluster or retreating away from room progress.
+    if not direction then
+        direction, yaw, emergency = self:GetAlwaysMovingPackWrap(
+            routeDirection,
+            targetYaw
+        )
+        if direction then
+            dodging = true
+        end
+    end
+
+    -- 4) Anti Aggro / non-pack situations can still use the standard melee panic.
+    if not direction then
+        direction, yaw, emergency = self:GetMeleePanicEscape(
+            targetYaw,
+            routeDirection
+        )
+        if direction then
+            dodging = true
+        end
+    end
+
+    local preferred = self:GetCombatPreferred(
+        routeDirection,
+        enemy,
+        targetYaw
+    )
+
+    -- 4) Visible hitboxes elsewhere do not matter. Dodge only if the current body
+    -- or the next few movement steps are actually threatened.
+    local danger = self:IsImmediateHazardDanger(preferred, targetYaw)
+
+    -- Only during a real dodge: if cooldown staging is holding still, borrow
+    -- the existing navigation/look direction as a candidate-search basis.
+    if danger
+        and preferred.Magnitude <= 0
+    then
+        preferred =
+            unit(
+                flatten(
+                    routeDirection
+                )
+            )
+
+        if preferred.Magnitude <= 0 then
+            preferred =
+                unit(
+                    flatten(
+                        self.CharacterService
+                            .Root.CFrame.LookVector
+                    )
+                )
+        end
+    end
+
+    if not direction and danger then
+        direction, yaw, emergency = self:FindNormalDodge(preferred, targetYaw)
+        if direction then
+            dodging = true
+        end
+    end
+
+    if not direction and danger then
+        direction, yaw, emergency = self:FindEmergencyOrientation(preferred, targetYaw)
+        if direction then
+            dodging = true
+        end
+    end
+
+    -- If a warning blocks the route and no safe candidate exists, do not
+    -- fall through to ordinary movement into its future damage area.
+    if not direction and danger then
+        direction, yaw, emergency, dodging = Vector3.zero, targetYaw, false, true
+    end
+
+    -- 5) No danger:
+    -- Navigation owns movement exactly. FindOpenMovement is only allowed once
+    -- combat/approach mode has taken over.
+    if not direction then
+        if self.ForceRouteMovement then
+            direction =
+                preferred
+
+        elseif self.TravelMode then
+            direction =
+                preferred
+        else
+            direction =
+                self:FindOpenMovement(
+                    preferred,
+                    targetYaw
+                )
+        end
+
+        yaw =
+            targetYaw
+
+        emergency =
+            false
+
+        dodging =
+            false
+    end
+
+    direction = direction or Vector3.zero
+    yaw = yaw or targetYaw
+    emergency = emergency or false
+
+    self.CachedDirection = direction
+    self.CachedYaw = yaw
+    self.CachedEmergency = emergency
+    self.CachedDodging = dodging
+    self.IsDodging = dodging
+
+    if direction.Magnitude > 0 then
+        self.LastMovement = direction
+    end
+
+    return direction, yaw, emergency, dodging
+end
+
+local CombatController = {}
+CombatController.__index =
+    CombatController
+
+function CombatController.new(
+    characterService,
+    selfTracker
+)
+    return setmetatable({
+        CharacterService =
+            characterService,
+
+        SelfTracker =
+            selfTracker,
+
+        LastPress = {
+            q = 0,
+            e = 0,
+        },
+
+        LastAction = nil,
+
+        AttackCommitTarget = nil,
+        AttackCommitUntil = 0,
+        CooldownHolding = false,
+    }, CombatController)
+end
+
+function CombatController:GetTool(slot)
+    for _, container in ipairs({
+        LocalPlayer.Backpack,
+        LocalPlayer.Character,
+    }) do
+        if container then
+            for _, tool in ipairs(
+                container:GetChildren()
+            ) do
+                if tool:IsA("Tool") then
+                    local abilitySlot =
+                        tool:FindFirstChild(
+                            "abilitySlot"
+                        )
+
+                    if abilitySlot
+                        and string.lower(
+                            tostring(
+                                abilitySlot.Value
+                            )
+                        ) == slot
+                    then
+                        return tool
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+function CombatController:IsBusyCasting()
+    local character =
+        self.CharacterService.Character
+
+    local busy =
+        character
+        and character:FindFirstChild(
+            "busyCasting"
+        )
+
+    return busy
+        and busy:IsA("BoolValue")
+        and busy.Value
+        or false
+end
+
+function CombatController:GetCooldownRemaining(slot)
+    local tool =
+        self:GetTool(slot)
+
+    if not tool then
+        return nil
+    end
+
+    local cooldown =
+        tool:FindFirstChild(
+            "cooldown"
+        )
+
+    if not cooldown then
+        return 0
+    end
+
+    local value =
+        tonumber(
+            cooldown.Value
+        )
+
+    if not value then
+        return 0
+    end
+
+    return math.max(
+        value,
+        0
+    )
+end
+
+function CombatController:IsSlotCooldownReady(slot)
+    local remaining =
+        self:GetCooldownRemaining(
+            slot
+        )
+
+    if remaining == nil then
+        return false
+    end
+
+    return remaining <= 0
+        and os.clock()
+            - self.LastPress[slot]
+            > 0.35
+end
+
+function CombatController:IsReady(slot)
+    if self:IsBusyCasting() then
+        return false
+    end
+
+    return self:IsSlotCooldownReady(
+        slot
+    )
+end
+
+function CombatController:GetPreparationState()
+    local hasDamage = false
+    local hasBuff = false
+
+    local damageReady = true
+    local buffReady = true
+
+    local longestWait = 0
+
+    for _, slot in ipairs({
+        "q",
+        "e",
+    }) do
+        local tool =
+            self:GetTool(slot)
+
+        if tool then
+            local remaining =
+                self:GetCooldownRemaining(
+                    slot
+                ) or 0
+
+            longestWait =
+                math.max(
+                    longestWait,
+                    remaining
+                )
+
+            local slotReady =
+                self:IsSlotCooldownReady(
+                    slot
+                )
+
+            if self:IsBuffTool(tool) then
+                hasBuff = true
+                if not slotReady then
+                    buffReady = false
+                end
+            else
+                hasDamage = true
+                if not slotReady then
+                    damageReady = false
+                end
+            end
+        end
+    end
+
+    return {
+        HasDamage = hasDamage,
+        HasBuff = hasBuff,
+        DamageReady = damageReady,
+        BuffReady = buffReady,
+        LongestWait = longestWait,
+    }
+end
+
+function CombatController:ClearCommit()
+    self.AttackCommitTarget = nil
+    self.AttackCommitUntil = 0
+end
+
+function CombatController:ArmCommit(enemy)
+    if not enemy
+        or not enemy.Model
+    then
+        return
+    end
+
+    self.AttackCommitTarget =
+        enemy.Model
+
+    self.AttackCommitUntil =
+        os.clock()
+        + CONFIG.AttackCommitWindow
+end
+
+function CombatController:IsCommitArmed(enemy)
+    if not enemy
+        or not enemy.Model
+    then
+        return false
+    end
+
+    if self.AttackCommitTarget
+        ~= enemy.Model
+    then
+        return false
+    end
+
+    if os.clock()
+        > self.AttackCommitUntil
+    then
+        self:ClearCommit()
+        return false
+    end
+
+    return true
+end
+
+function CombatController:ShouldHoldApproach(
+    enemy,
+    travelMode
+)
+    self.CooldownHolding =
+        false
+
+    if not enemy
+        or not enemy.Root
+        or not enemy.Root.Parent
+        or not self.CharacterService:IsAlive()
+    then
+        self:ClearCommit()
+        return false
+    end
+
+    -- Never let cooldown staging stop a legitimate dungeon detour. Travel mode
+    -- gets through doors/corridors first; the hold begins only once UIW actually
+    -- has a normal direct approach to the pack.
+    if travelMode then
+        return false
+    end
+
+    local distance =
+        flatten(
+            enemy.Root.Position
+            - self.CharacterService.Root.Position
+        ).Magnitude
+
+    -- Far away: keep traveling. Already in attack range: the pack is effectively
+    -- engaged, so keep fighting/orbiting instead of freezing for cooldowns.
+    if distance
+        > CONFIG.PreAggroHoldDistance
+        or distance
+        <= CONFIG.DamageCastRange
+    then
+        return false
+    end
+
+    local state =
+        self:GetPreparationState()
+
+    if not state.HasDamage then
+        return false
+    end
+
+    -- After the setup buff is cast, remain staged only for the actual cast lock.
+    -- Once busyCasting clears, commit into range while the damage spell is ready.
+    if self:IsCommitArmed(enemy) then
+        if self:IsBusyCasting() then
+            self.CooldownHolding = true
+            return true
+        end
+
+        if state.DamageReady then
+            return false
+        end
+
+        self.CooldownHolding = true
+        return true
+    end
+
+    -- With a buff such as Inner Rage / Inner Focus equipped, wait for BOTH the
+    -- buff and the damage skill. Update() casts the buff while standing here,
+    -- arms the commit, then UIW advances as soon as the cast lock ends.
+    if state.HasBuff then
+        if not state.DamageReady
+            or not state.BuffReady
+        then
+            self.CooldownHolding = true
+            return true
+        end
+
+        self.CooldownHolding = true
+        return true
+    end
+
+    -- Two damaging skills: do not cross the staging line until both are ready.
+    if not state.DamageReady then
+        self.CooldownHolding = true
+        return true
+    end
+
+    return false
+end
+
+function CombatController:GetHoldText()
+    local state =
+        self:GetPreparationState()
+
+    if self:IsBusyCasting() then
+        return "priming attack"
+    end
+
+    if state.LongestWait > 0.05 then
+        return "waiting cooldowns | "
+            .. string.format(
+                "%.1fs",
+                state.LongestWait
+            )
+    end
+
+    return "attack ready | holding aggro line"
+end
+
+function CombatController:IsBuffTool(tool)
+    if not tool then
+        return false
+    end
+
+    local buffPower = tool:FindFirstChild("buffPower")
+    local damage = tool:FindFirstChild("damage")
+
+    return buffPower ~= nil and damage == nil
+end
+
+function CombatController:Press(slot)
+    local keyCode =
+        slot == "q"
+        and Enum.KeyCode.Q
+        or Enum.KeyCode.E
+
+    self.LastPress[slot] =
+        os.clock()
+
+    self.SelfTracker:
+        RegisterCast(slot)
+
+    VirtualInputManager:
+        SendKeyEvent(
+            true,
+            keyCode,
+            false,
+            game
+        )
+
+    task.delay(
+        0.045,
+        function()
+            VirtualInputManager:
+                SendKeyEvent(
+                    false,
+                    keyCode,
+                    false,
+                    game
+                )
+        end
+    )
+
+    self.LastAction =
+        slot
+end
+
+function CombatController:Update(enemy)
+    self.LastAction = nil
+
+    if not enemy
+        or not enemy.Root
+        or not enemy.Root.Parent
+        or not self.CharacterService:IsAlive()
+    then
+        self:ClearCommit()
+        return false
+    end
+
+    local distance =
+        flatten(
+            enemy.Root.Position
+            - self.CharacterService.Root.Position
+        ).Magnitude
+
+    local qTool =
+        self:GetTool("q")
+
+    local eTool =
+        self:GetTool("e")
+
+    local preparation =
+        self:GetPreparationState()
+
+    local staging =
+        distance
+            > CONFIG.DamageCastRange
+        and distance
+            <= CONFIG.PreAggroHoldDistance
+
+    local qBuff =
+        self:IsBuffTool(
+            qTool
+        )
+
+    local eBuff =
+        self:IsBuffTool(
+            eTool
+        )
+
+    -- Q remains first. A self-buff is deliberately SAVED while traveling and is
+    -- only fired at the staging line once the damaging skill(s) are also ready.
+    -- This makes the next forward commit happen immediately after the setup cast.
+    local qAllowed =
+        false
+
+    if qTool then
+        if qBuff then
+            qAllowed =
+                distance <= CONFIG.DamageCastRange
+                or (
+                    staging
+                    and preparation.DamageReady
+                )
+        else
+            qAllowed =
+                distance
+                <= CONFIG.DamageCastRange
+        end
+    end
+
+    if qAllowed
+        and self:IsReady("q")
+    then
+        if qBuff
+            and staging
+            and preparation.DamageReady
+        then
+            self:ArmCommit(
+                enemy
+            )
+        end
+
+        self:Press("q")
+        return true
+    end
+
+    -- E follows Q. If E itself is a buff, use the same staging rule: don't burn it
+    -- far away from the pack, and only prime it once damaging skills are ready.
+    local eAllowed =
+        false
+
+    if eTool then
+        if eBuff then
+            eAllowed =
+                distance <= CONFIG.DamageCastRange
+                or (
+                    staging
+                    and preparation.DamageReady
+                )
+        else
+            eAllowed =
+                distance
+                <= CONFIG.DamageCastRange
+        end
+    end
+
+    if eAllowed
+        and self:IsReady("e")
+    then
+        if eBuff
+            and staging
+            and preparation.DamageReady
+        then
+            self:ArmCommit(
+                enemy
+            )
+        end
+
+        self:Press("e")
+
+        if not eBuff then
+            self:ClearCommit()
+        end
+
+        return true
+    end
+
+    return false
+end
+
+
+local TargetHealthBar = {}
+TargetHealthBar.__index =
+    TargetHealthBar
+
+function TargetHealthBar.new()
+    local self =
+        setmetatable(
+            {},
+            TargetHealthBar
+        )
+
+    local gui =
+        Instance.new(
+            "ScreenGui"
+        )
+
+    gui.Name =
+        "UIWTargetHealth"
+
+    gui.ResetOnSpawn =
+        false
+
+    gui.IgnoreGuiInset =
+        false
+
+    gui.Parent =
+        LocalPlayer.PlayerGui
+
+    self.Gui =
+        gui
+
+    local existing =
+        LocalPlayer.PlayerGui:
+        FindFirstChild(
+            "bossHealth"
+        )
+
+    if existing
+        and existing:
+        FindFirstChild(
+            "healthFrame"
+        )
+    then
+        self.Frame =
+            existing.healthFrame:
+            Clone()
+
+        self.Frame.Name =
+            "TargetHealthFrame"
+
+        self.Frame.Parent =
+            gui
+    else
+        local frame =
+            Instance.new(
+                "Frame"
+            )
+
+        frame.AnchorPoint =
+            Vector2.new(
+                0.5,
+                0
+            )
+
+        frame.Position =
+            UDim2.fromScale(
+                0.5,
+                0.16
+            )
+
+        frame.Size =
+            UDim2.fromScale(
+                0.35,
+                0.05
+            )
+
+        frame.BackgroundColor3 =
+            Color3.fromRGB(
+                25,
+                25,
+                25
+            )
+
+        frame.BorderSizePixel =
+            0
+
+        frame.Parent =
+            gui
+
+        local fill =
+            Instance.new(
+                "Frame"
+            )
+
+        fill.Name =
+            "currentHealth"
+
+        fill.Size =
+            UDim2.fromScale(
+                1,
+                1
+            )
+
+        fill.BackgroundColor3 =
+            Color3.fromRGB(
+                150,
+                45,
+                45
+            )
+
+        fill.BorderSizePixel =
+            0
+
+        fill.Parent =
+            frame
+
+        local health =
+            Instance.new(
+                "TextLabel"
+            )
+
+        health.Name =
+            "health"
+
+        health.BackgroundTransparency =
+            1
+
+        health.Size =
+            UDim2.fromScale(
+                1,
+                1
+            )
+
+        health.Font =
+            Enum.Font.Highway
+
+        health.TextSize =
+            14
+
+        health.TextColor3 =
+            Color3.fromRGB(
+                245,
+                245,
+                245
+            )
+
+        health.Parent =
+            frame
+
+        local name =
+            Instance.new(
+                "TextLabel"
+            )
+
+        name.Name =
+            "bossName"
+
+        name.BackgroundTransparency =
+            1
+
+        name.AnchorPoint =
+            Vector2.new(
+                0.5,
+                1
+            )
+
+        name.Position =
+            UDim2.fromScale(
+                0.5,
+                0
+            )
+
+        name.Size =
+            UDim2.fromScale(
+                1,
+                0.8
+            )
+
+        name.Font =
+            Enum.Font.Highway
+
+        name.TextSize =
+            14
+
+        name.TextColor3 =
+            Color3.fromRGB(
+                191,
+                171,
+                58
+            )
+
+        name.Parent =
+            frame
+
+        self.Frame =
+            frame
+    end
+
+    self.Frame.Visible =
+        false
+
+    self.Target =
+        nil
+
+    return self
+end
+
+function TargetHealthBar:SetTarget(enemy)
+    self.Target =
+        enemy
+end
+
+function TargetHealthBar:Update()
+    local enemy =
+        self.Target
+
+    if not enemy
+        or not enemy.Model
+        or not enemy.Model.Parent
+        or not enemy.Humanoid
+        or enemy.Humanoid.Health <= 0
+    then
+        self.Frame.Visible =
+            false
+
+        return
+    end
+
+    self.Frame.Visible =
+        true
+
+    local name =
+        self.Frame:
+        FindFirstChild(
+            "bossName",
+            true
+        )
+
+    local health =
+        self.Frame:
+        FindFirstChild(
+            "health",
+            true
+        )
+
+    if name
+        and name:IsA("TextLabel")
+    then
+        name.Text =
+            enemy.Model.Name
+    end
+
+    if health
+        and health:IsA("TextLabel")
+    then
+        health.Text =
+            shortNumber(
+                enemy.Humanoid.Health
+            )
+            .. "/"
+            .. shortNumber(
+                enemy.Humanoid.MaxHealth
+            )
+    end
+
+    local current =
+        self.Frame:
+        FindFirstChild(
+            "currentHealth",
+            true
+        )
+
+    if current
+        and current:IsA("GuiObject")
+    then
+        local ratio =
+            math.clamp(
+                enemy.Humanoid.Health
+                / math.max(
+                    enemy.Humanoid.MaxHealth,
+                    1
+                ),
+                0,
+                1
+            )
+
+        current.Size =
+            UDim2.new(
+                ratio,
+                0,
+                1,
+                0
+            )
+    end
+end
+
+function TargetHealthBar:Destroy()
+    safeDestroy(
+        self.Gui
+    )
+end
+
+local HUD = {}
+HUD.__index = HUD
+
+function HUD.new()
+    local self = setmetatable({}, HUD)
+
+    self.StartTime = os.clock()
+    self.Visible = true
+    self.Frames = 0
+    self.LastFpsUpdate = os.clock()
+    self.LastStatusAction = nil
+    self.AnimTweens = {}
+
+    -- University of the Incarnate Word-inspired palette.
+    -- Cardinal Red: RGB 203, 51, 59. Dark Red: RGB 167, 52, 57.
+    local UIW_RED = Color3.fromRGB(203, 51, 59)
+    local UIW_DARK_RED = Color3.fromRGB(167, 52, 57)
+    local UIW_BLACK = Color3.fromRGB(0, 0, 0)
+    local UIW_WHITE = Color3.fromRGB(235, 235, 232)
+    local UIW_GREY = Color3.fromRGB(99, 102, 106)
+    local UIW_LIGHT_GREY = Color3.fromRGB(177, 179, 179)
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "UIW"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = false
+    gui.DisplayOrder = 100
+    gui.Parent = LocalPlayer.PlayerGui
+    self.Gui = gui
+
+    local main = Instance.new("Frame")
+    main.Name = "Main"
+    main.AnchorPoint = Vector2.new(0, 1)
+    main.Position = UDim2.new(0, 18, 1, -30)
+    main.Size = UDim2.fromOffset(454, 8)
+    main.BackgroundColor3 = Color3.fromRGB(6, 6, 7)
+    main.BackgroundTransparency = 1
+    main.BorderSizePixel = 0
+    main.ClipsDescendants = true
+    main.Parent = gui
+    self.Main = main
+    self.OpenPosition = UDim2.new(0, 18, 1, -42)
+    self.HiddenPosition = UDim2.new(0, -470, 1, -42)
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Thickness = 1
+    stroke.Transparency = 1
+    stroke.Color = UIW_DARK_RED
+    stroke.Parent = main
+    self.MainStroke = stroke
+
+    local shadow = Instance.new("Frame")
+    shadow.Name = "Shadow"
+    shadow.Position = UDim2.fromOffset(4, 4)
+    shadow.Size = UDim2.new(1, 0, 1, 0)
+    shadow.BackgroundColor3 = UIW_BLACK
+    shadow.BackgroundTransparency = 0.42
+    shadow.BorderSizePixel = 0
+    shadow.ZIndex = 0
+    shadow.Parent = main
+
+    local top = Instance.new("Frame")
+    top.Name = "TopBar"
+    top.Size = UDim2.new(1, 0, 0, 24)
+    top.BackgroundColor3 = Color3.fromRGB(13, 9, 10)
+    top.BackgroundTransparency = 0.03
+    top.BorderSizePixel = 0
+    top.ZIndex = 2
+    top.Parent = main
+
+    local topLine = Instance.new("Frame")
+    topLine.AnchorPoint = Vector2.new(0, 1)
+    topLine.Position = UDim2.new(0, 0, 1, 0)
+    topLine.Size = UDim2.new(1, 0, 0, 1)
+    topLine.BackgroundColor3 = UIW_RED
+    topLine.BorderSizePixel = 0
+    topLine.ZIndex = 3
+    topLine.Parent = top
+
+    local leftMark = Instance.new("Frame")
+    leftMark.Position = UDim2.fromOffset(0, 0)
+    leftMark.Size = UDim2.fromOffset(3, 24)
+    leftMark.BackgroundColor3 = UIW_RED
+    leftMark.BorderSizePixel = 0
+    leftMark.ZIndex = 4
+    leftMark.Parent = top
+
+    local title = Instance.new("TextLabel")
+    title.BackgroundTransparency = 1
+    title.Position = UDim2.fromOffset(10, 0)
+    title.Size = UDim2.fromOffset(245, 24)
+    title.Font = Enum.Font.Code
+    title.TextSize = 12
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.TextColor3 = UIW_WHITE
+    title.Text = "[ UIW / NAV ]"
+    title.ZIndex = 4
+    title.Parent = top
+
+    local version = Instance.new("TextLabel")
+    version.BackgroundTransparency = 1
+    version.Position = UDim2.fromOffset(113, 0)
+    version.Size = UDim2.fromOffset(165, 24)
+    version.Font = Enum.Font.Code
+    version.TextSize = 10
+    version.TextXAlignment = Enum.TextXAlignment.Left
+    version.TextColor3 = UIW_LIGHT_GREY
+    version.Text = "v52  anti-aggro"
+    version.ZIndex = 4
+    version.Parent = top
+
+    local fps = Instance.new("TextLabel")
+    fps.BackgroundTransparency = 1
+    fps.AnchorPoint = Vector2.new(1, 0)
+    fps.Position = UDim2.new(1, -8, 0, 0)
+    fps.Size = UDim2.fromOffset(110, 24)
+    fps.Font = Enum.Font.Code
+    fps.TextSize = 10
+    fps.TextXAlignment = Enum.TextXAlignment.Right
+    fps.TextColor3 = UIW_LIGHT_GREY
+    fps.Text = "fps  --"
+    fps.ZIndex = 4
+    fps.Parent = top
+    self.FPSLabel = fps
+
+    local accent = Instance.new("Frame")
+    accent.Name = "StatusRail"
+    accent.Position = UDim2.fromOffset(0, 25)
+    accent.Size = UDim2.fromOffset(2, 82)
+    accent.BorderSizePixel = 0
+    accent.BackgroundColor3 = UIW_RED
+    accent.ZIndex = 3
+    accent.Parent = main
+    self.Accent = accent
+
+    local railGlow = Instance.new("Frame")
+    railGlow.Name = "StatusRailGlow"
+    railGlow.Position = UDim2.fromOffset(2, 25)
+    railGlow.Size = UDim2.fromOffset(4, 82)
+    railGlow.BorderSizePixel = 0
+    railGlow.BackgroundColor3 = UIW_RED
+    railGlow.BackgroundTransparency = 0.78
+    railGlow.ZIndex = 2
+    railGlow.Parent = main
+    self.RailGlow = railGlow
+
+    local function createRow(key, y)
+        local label = Instance.new("TextLabel")
+        label.BackgroundTransparency = 1
+        label.Position = UDim2.fromOffset(10, y)
+        label.Size = UDim2.fromOffset(86, 20)
+        label.Font = Enum.Font.Code
+        label.TextSize = 11
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.TextColor3 = UIW_GREY
+        label.Text = string.format("%-9s", key)
+        label.ZIndex = 3
+        label.Parent = main
+
+        local sep = Instance.new("TextLabel")
+        sep.BackgroundTransparency = 1
+        sep.Position = UDim2.fromOffset(92, y)
+        sep.Size = UDim2.fromOffset(12, 20)
+        sep.Font = Enum.Font.Code
+        sep.TextSize = 11
+        sep.TextColor3 = UIW_DARK_RED
+        sep.Text = ">"
+        sep.ZIndex = 3
+        sep.Parent = main
+
+        local value = Instance.new("TextLabel")
+        value.BackgroundTransparency = 1
+        value.Position = UDim2.fromOffset(108, y)
+        value.Size = UDim2.new(1, -118, 0, 20)
+        value.Font = Enum.Font.Code
+        value.TextSize = 11
+        value.TextXAlignment = Enum.TextXAlignment.Left
+        value.TextTruncate = Enum.TextTruncate.AtEnd
+        value.TextColor3 = Color3.fromRGB(213, 213, 210)
+        value.ZIndex = 3
+        value.Parent = main
+        return value
+    end
+
+    self.Playtime = createRow("uptime", 31)
+    self.Status = createRow("state", 53)
+    self.Ping = createRow("latency", 75)
+
+    local divider = Instance.new("Frame")
+    divider.Position = UDim2.fromOffset(8, 101)
+    divider.Size = UDim2.new(1, -16, 0, 1)
+    divider.BackgroundColor3 = Color3.fromRGB(62, 28, 31)
+    divider.BorderSizePixel = 0
+    divider.ZIndex = 3
+    divider.Parent = main
+
+    local prompt = Instance.new("TextLabel")
+    prompt.BackgroundTransparency = 1
+    prompt.Position = UDim2.fromOffset(9, 108)
+    prompt.Size = UDim2.new(1, -18, 0, 16)
+    prompt.Font = Enum.Font.Code
+    prompt.TextSize = 10
+    prompt.TextXAlignment = Enum.TextXAlignment.Left
+    prompt.TextColor3 = UIW_RED
+    prompt.Text = "$ uiw --autofarm --anti-aggro"
+    prompt.ZIndex = 3
+    prompt.Parent = main
+
+    local cursor = Instance.new("TextLabel")
+    cursor.Name = "Cursor"
+    cursor.BackgroundTransparency = 1
+    cursor.Position = UDim2.fromOffset(194, 108)
+    cursor.Size = UDim2.fromOffset(10, 16)
+    cursor.Font = Enum.Font.Code
+    cursor.TextSize = 10
+    cursor.TextXAlignment = Enum.TextXAlignment.Left
+    cursor.TextColor3 = UIW_RED
+    cursor.Text = "_"
+    cursor.ZIndex = 4
+    cursor.Parent = main
+    self.Cursor = cursor
+
+    local footer = Instance.new("TextLabel")
+    footer.BackgroundTransparency = 1
+    footer.Position = UDim2.fromOffset(9, 124)
+    footer.Size = UDim2.new(1, -18, 0, 14)
+    footer.Font = Enum.Font.Code
+    footer.TextSize = 9
+    footer.TextXAlignment = Enum.TextXAlignment.Left
+    footer.TextColor3 = UIW_GREY
+    footer.Text = "[RightShift] toggle    node: cardinal-01"
+    footer.ZIndex = 3
+    footer.Parent = main
+
+    local badge = Instance.new("TextLabel")
+    badge.BackgroundTransparency = 1
+    badge.AnchorPoint = Vector2.new(1, 0)
+    badge.Position = UDim2.new(1, -8, 0, 108)
+    badge.Size = UDim2.fromOffset(150, 16)
+    badge.Font = Enum.Font.Code
+    badge.TextSize = 10
+    badge.TextXAlignment = Enum.TextXAlignment.Right
+    badge.TextColor3 = UIW_RED
+    badge.Text = "[ RUNNING ]"
+    badge.ZIndex = 4
+    badge.Parent = main
+    self.Badge = badge
+
+    -- Lightweight scan line. TweenService handles this independently; no per-frame UI work.
+    local scan = Instance.new("Frame")
+    scan.Name = "ScanLine"
+    scan.Position = UDim2.new(0, 5, 0, 26)
+    scan.Size = UDim2.new(1, -10, 0, 1)
+    scan.BackgroundColor3 = UIW_RED
+    scan.BackgroundTransparency = 0.90
+    scan.BorderSizePixel = 0
+    scan.ZIndex = 2
+    scan.Parent = main
+    self.ScanLine = scan
+
+    -- Boot animation: slide in, expand vertically, then settle the border.
+    main.Position = UDim2.new(0, -470, 1, -42)
+    local slide = TweenService:Create(
+        main,
+        TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+        {Position = self.OpenPosition}
+    )
+    local expand = TweenService:Create(
+        main,
+        TweenInfo.new(0.30, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+        {Size = UDim2.fromOffset(454, 142), BackgroundTransparency = 0.03}
+    )
+    local borderIn = TweenService:Create(
+        stroke,
+        TweenInfo.new(0.24, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        {Transparency = 0.14}
+    )
+    table.insert(self.AnimTweens, slide)
+    table.insert(self.AnimTweens, expand)
+    table.insert(self.AnimTweens, borderIn)
+    slide:Play()
+    task.delay(0.08, function()
+        if self.Gui and self.Gui.Parent then
+            expand:Play()
+            borderIn:Play()
+        end
+    end)
+
+    local cursorBlink = TweenService:Create(
+        cursor,
+        TweenInfo.new(0.48, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1, true),
+        {TextTransparency = 0.78}
+    )
+    local scanTween = TweenService:Create(
+        scan,
+        TweenInfo.new(2.8, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1, false),
+        {Position = UDim2.new(0, 5, 0, 98)}
+    )
+    local glowPulse = TweenService:Create(
+        railGlow,
+        TweenInfo.new(0.85, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+        {BackgroundTransparency = 0.94}
+    )
+    table.insert(self.AnimTweens, cursorBlink)
+    table.insert(self.AnimTweens, scanTween)
+    table.insert(self.AnimTweens, glowPulse)
+    cursorBlink:Play()
+    scanTween:Play()
+    glowPulse:Play()
+
+    return self
+end
+
+function HUD:EnsureMovementArrow(root)
+    if self.MovementArrow3D
+        and self.MovementArrow3D.Root == root
+        and self.MovementArrow3D.Shaft
+        and self.MovementArrow3D.Shaft.Parent
+    then
+        return
+    end
+
+    if self.MovementArrow3D then
+        for _, object in pairs(self.MovementArrow3D) do
+            if typeof(object) == "Instance" then
+                safeDestroy(object)
+            end
+        end
+        self.MovementArrow3D = nil
+    end
+
+    if not root or not root.Parent then
+        return
+    end
+
+    -- A real 3D arrow: CylinderHandleAdornment + ConeHandleAdornment.
+    -- Both are adorned to Terrain so their CFrames can be supplied directly in
+    -- world space, while AlwaysOnTop keeps the debug/navigation marker readable.
+    local parent = self.Gui and self.Gui.Parent or LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not parent then
+        return
+    end
+
+    local glowShaft = Instance.new("CylinderHandleAdornment")
+    glowShaft.Name = "UIW_PathArrow_GlowShaft"
+    glowShaft.Adornee = Workspace.Terrain
+    glowShaft.AlwaysOnTop = true
+    glowShaft.ZIndex = 4
+    glowShaft.Radius = 0.34
+    glowShaft.Transparency = 0.58
+    glowShaft.Color3 = COLORS.Pathing
+    glowShaft.Parent = parent
+
+    local shaft = Instance.new("CylinderHandleAdornment")
+    shaft.Name = "UIW_PathArrow_Shaft"
+    shaft.Adornee = Workspace.Terrain
+    shaft.AlwaysOnTop = true
+    shaft.ZIndex = 6
+    shaft.Radius = 0.17
+    shaft.Transparency = 0.03
+    shaft.Color3 = COLORS.Pathing
+    shaft.Parent = parent
+
+    local glowHead = Instance.new("ConeHandleAdornment")
+    glowHead.Name = "UIW_PathArrow_GlowHead"
+    glowHead.Adornee = Workspace.Terrain
+    glowHead.AlwaysOnTop = true
+    glowHead.ZIndex = 4
+    glowHead.Radius = 0.92
+    glowHead.Height = 2.05
+    glowHead.Hollow = false
+    glowHead.Transparency = 0.58
+    glowHead.Color3 = COLORS.Pathing
+    glowHead.Parent = parent
+
+    local head = Instance.new("ConeHandleAdornment")
+    head.Name = "UIW_PathArrow_Head"
+    head.Adornee = Workspace.Terrain
+    head.AlwaysOnTop = true
+    head.ZIndex = 6
+    head.Radius = 0.66
+    head.Height = 1.72
+    head.Hollow = false
+    head.Transparency = 0.02
+    head.Color3 = COLORS.Pathing
+    head.Parent = parent
+
+    self.MovementArrow3D = {
+        Root = root,
+        Shaft = shaft,
+        Head = head,
+        GlowShaft = glowShaft,
+        GlowHead = glowHead,
+        SmoothedDirection = nil,
+        SmoothedOrigin = nil,
+        LastArrowUpdate = os.clock(),
+        LastColorState = nil,
+    }
+end
+
+function HUD:SetMovementArrow3DVisible(visible)
+    local marker = self.MovementArrow3D
+    if not marker then
+        return
+    end
+
+    marker.Shaft.Transparency = visible and 0.03 or 1
+    marker.Head.Transparency = visible and 0.02 or 1
+    marker.GlowShaft.Transparency = visible and 0.58 or 1
+    marker.GlowHead.Transparency = visible and 0.58 or 1
+end
+
+function HUD:UpdateMovementArrow(root, direction, dodging, emergency, recovering)
+    self:EnsureMovementArrow(root)
+
+    local marker = self.MovementArrow3D
+    if not marker then
+        return
+    end
+
+    direction = direction or Vector3.zero
+    local planar = flatten(direction)
+
+    if planar.Magnitude <= 0.05 or not self.Visible then
+        self:SetMovementArrow3DVisible(false)
+        return
+    end
+
+    self:SetMovementArrow3DVisible(true)
+    planar = unit(planar)
+
+    -- Smooth both turning and world-space follow motion so pathfinder corrections
+    -- do not make the 3D arrow snap/jitter from one frame to the next.
+    local now = os.clock()
+    local dt = math.clamp(now - (marker.LastArrowUpdate or now), 0, 0.10)
+    marker.LastArrowUpdate = now
+
+    local turnAlpha = 1 - math.exp(-10 * dt)
+    local followAlpha = 1 - math.exp(-14 * dt)
+
+    if not marker.SmoothedDirection or marker.SmoothedDirection.Magnitude <= 0.001 then
+        marker.SmoothedDirection = planar
+    else
+        local blended = marker.SmoothedDirection:Lerp(planar, turnAlpha)
+        if blended.Magnitude > 0.001 then
+            marker.SmoothedDirection = blended.Unit
+        else
+            marker.SmoothedDirection = planar
+        end
+    end
+    planar = marker.SmoothedDirection
+
+    -- UIW brand-state arrow palette:
+    -- PATH / normal movement  = Cardinal Red
+    -- DODGE                   = White
+    -- EMERGENCY               = Dark Red
+    -- RECOVERY                = UIW Grey
+    local arrowState = "PATH"
+    local color = Color3.fromRGB(203, 51, 59)
+
+    if emergency then
+        arrowState = "EMERGENCY"
+        color = Color3.fromRGB(167, 52, 57)
+    elseif dodging then
+        arrowState = "DODGE"
+        color = Color3.fromRGB(235, 235, 232)
+    elseif recovering then
+        arrowState = "RECOVERY"
+        color = Color3.fromRGB(99, 102, 106)
+    end
+
+    -- Animate color changes only when the movement state actually changes.
+    -- This keeps the arrow responsive without creating tweens every frame.
+    if marker.LastColorState ~= arrowState then
+        marker.LastColorState = arrowState
+
+        local tweenInfo = TweenInfo.new(
+            0.16,
+            Enum.EasingStyle.Quad,
+            Enum.EasingDirection.Out
+        )
+
+        TweenService:Create(marker.Shaft, tweenInfo, {Color3 = color}):Play()
+        TweenService:Create(marker.Head, tweenInfo, {Color3 = color}):Play()
+
+        local glowColor = color
+        if arrowState == "PATH" then
+            glowColor = Color3.fromRGB(188, 61, 67)
+        elseif arrowState == "DODGE" then
+            glowColor = Color3.fromRGB(177, 179, 179)
+        elseif arrowState == "EMERGENCY" then
+            glowColor = Color3.fromRGB(203, 51, 59)
+        elseif arrowState == "RECOVERY" then
+            glowColor = Color3.fromRGB(177, 179, 179)
+        end
+
+        TweenService:Create(marker.GlowShaft, tweenInfo, {Color3 = glowColor}):Play()
+        TweenService:Create(marker.GlowHead, tweenInfo, {Color3 = glowColor}):Play()
+    end
+
+    -- Float the arrow over the character and point it in the final authoritative
+    -- world-space movement direction.  This means turns, path corrections, pull
+    -- routing, dodge overrides, and stuck recovery are visible instantly in 3D.
+    local speed = flatten(root.AssemblyLinearVelocity).Magnitude
+    local length = math.clamp(4.6 + speed * 0.035, 4.6, 5.6)
+    local headLength = 1.72
+    local shaftLength = math.max(0.8, length - headLength * 0.78)
+    local targetFrom = root.Position + Vector3.new(0, 5.4, 0)
+    if not marker.SmoothedOrigin then
+        marker.SmoothedOrigin = targetFrom
+    else
+        marker.SmoothedOrigin = marker.SmoothedOrigin:Lerp(targetFrom, followAlpha)
+    end
+    local from = marker.SmoothedOrigin
+    local tip = from + planar * length
+    local headBase = tip - planar * headLength
+    local shaftEnd = headBase + planar * 0.16
+    local shaftMid = (from + shaftEnd) * 0.5
+
+    -- Roblox's cylinder/cone adornments align their height along the look-at axis.
+    marker.Shaft.Height = shaftLength
+    marker.GlowShaft.Height = shaftLength
+    marker.Shaft.CFrame = CFrame.lookAt(shaftMid, shaftEnd)
+    marker.GlowShaft.CFrame = marker.Shaft.CFrame
+
+    -- Position the cone so its point lands at `tip` and its base meets the shaft.
+    -- This placement follows the common CylinderHandleAdornment +
+    -- ConeHandleAdornment arrow pattern used for Roblox 3D debug arrows.
+    local headCenter = tip - planar * (headLength * 0.5)
+    marker.Head.Height = headLength
+    marker.GlowHead.Height = headLength + 0.30
+    marker.Head.CFrame = CFrame.lookAt(headCenter, tip)
+    marker.GlowHead.CFrame = marker.Head.CFrame
+end
+
+function HUD:BindController(controller)
+    self.Controller = controller
+end
+
+function HUD:SetStatus(
+    action,
+    text
+)
+    local color = Color3.fromRGB(167, 52, 57)
+
+    if action == "MOVING" or action == "RUNNING" then
+        color = Color3.fromRGB(203, 51, 59)
+    elseif action == "PATHING" then
+        color = Color3.fromRGB(188, 61, 67)
+    elseif action == "COMBAT" then
+        color = Color3.fromRGB(220, 72, 78)
+    elseif action == "DODGING" then
+        color = Color3.fromRGB(238, 84, 90)
+    elseif action == "EMERGENCY" then
+        color = Color3.fromRGB(255, 102, 107)
+    elseif action == "MELEE" then
+        color = Color3.fromRGB(224, 74, 82)
+    end
+
+    self.Accent.BackgroundColor3 = color
+    if self.RailGlow then
+        self.RailGlow.BackgroundColor3 = color
+    end
+    self.Badge.TextColor3 = color
+    self.Status.Text = text or action
+
+    -- Short state-change pulse only; avoids continuous per-frame UI churn.
+    if self.LastStatusAction ~= action then
+        self.LastStatusAction = action
+        self.Accent.Size = UDim2.fromOffset(4, 82)
+        TweenService:Create(
+            self.Accent,
+            TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            {Size = UDim2.fromOffset(2, 82)}
+        ):Play()
+    end
+end
+
+function HUD:Heartbeat()
+    self.Frames += 1
+
+    local now =
+        os.clock()
+
+    local elapsed =
+        now - self.StartTime
+
+    self.Playtime.Text =
+        string.format(
+            "%02d:%02d",
+            math.floor(
+                elapsed / 60
+            ),
+            math.floor(
+                elapsed % 60
+            )
+        )
+
+    if now - self.LastFpsUpdate
+        >= 0.5
+    then
+        local duration =
+            now
+            - self.LastFpsUpdate
+
+        self.FPSLabel.Text =
+            "fps: "
+            .. tostring(
+                math.floor(
+                    self.Frames
+                    / duration
+                )
+            )
+
+        self.Frames =
+            0
+
+        self.LastFpsUpdate =
+            now
+
+        local ping = 0
+
+        pcall(function()
+            ping =
+                math.floor(
+                    Stats.Network
+                        .ServerStatsItem[
+                            "Data Ping"
+                        ]:
+                        GetValue()
+                )
+        end)
+
+        self.Ping.Text =
+            tostring(ping)
+    end
+end
+
+function HUD:Toggle()
+    self.Visible = not self.Visible
+
+    if self.Visible then
+        self.Main.Visible = true
+        self.Main.Position = self.HiddenPosition
+        self.Main.BackgroundTransparency = 0.35
+        TweenService:Create(
+            self.Main,
+            TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+            {
+                Position = self.OpenPosition,
+                BackgroundTransparency = 0.03,
+            }
+        ):Play()
+    else
+        local hideTween = TweenService:Create(
+            self.Main,
+            TweenInfo.new(0.20, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
+            {
+                Position = self.HiddenPosition,
+                BackgroundTransparency = 0.35,
+            }
+        )
+        hideTween:Play()
+        task.delay(0.21, function()
+            if self.Main and self.Main.Parent and not self.Visible then
+                self.Main.Visible = false
+            end
+        end)
+    end
+
+    if self.MovementArrow3D then
+        self:SetMovementArrow3DVisible(self.Visible)
+    end
+end
+
+function HUD:Destroy()
+    if self.AnimTweens then
+        for _, tween in ipairs(self.AnimTweens) do
+            pcall(function()
+                tween:Cancel()
+            end)
+        end
+        self.AnimTweens = nil
+    end
+
+    if self.MovementArrow3D then
+        for _, object in pairs(self.MovementArrow3D) do
+            if typeof(object) == "Instance" then
+                safeDestroy(object)
+            end
+        end
+        self.MovementArrow3D = nil
+    end
+
+    safeDestroy(
+        self.Gui
+    )
+end
+
+local UIWController = {}
+UIWController.__index =
+    UIWController
+
+function UIWController.new()
+    local self =
+        setmetatable(
+            {},
+            UIWController
+        )
+
+    self.Maid =
+        Maid.new()
+
+    self.Character =
+        CharacterService.new()
+
+    self.Dungeon =
+        DungeonModel.new()
+
+    self.SelfAbilities =
+        SelfAbilityTracker.new()
+
+    self.Hazards =
+        HazardTracker.new(
+            self.Character,
+            self.SelfAbilities
+        )
+
+    self.Geometry =
+        GeometrySensor.new(
+            self.Character
+        )
+
+    self.Route =
+        RoutePlanner.new(
+            self.Character,
+            self.Geometry,
+            self.Hazards,
+            self.Dungeon
+        )
+
+    self.Dodger =
+        DodgeSolver.new(
+            self.Character,
+            self.Hazards,
+            self.Geometry,
+            self.Dungeon
+        )
+
+    self.Combat =
+        CombatController.new(
+            self.Character,
+            self.SelfAbilities
+        )
+
+    self.ESP =
+        HitboxESP.new(
+            self.Hazards
+        )
+
+    self.TargetHealth =
+        TargetHealthBar.new()
+
+    self.HUD =
+        HUD.new()
+
+    self.CurrentEnemy =
+        nil
+
+    self.CurrentEnemyModel =
+        nil
+
+    self.CurrentEnemyDeathConnection =
+        nil
+
+    self.LastWorldRefresh =
+        0
+
+    self.LastProgressPosition =
+        nil
+
+    self.LastProgressTime =
+        0
+
+    self.LastNavigationAutoJump =
+        0
+
+    self.LastCommandedMovement =
+        Vector3.zero
+
+    self.RecoveryDirection =
+        Vector3.zero
+
+    self.RecoveryUntil =
+        0
+
+    self.RecoverySign =
+        1
+
+    self.HardRecoveryActive =
+        false
+
+    -- Crystal Golem wall mechanic state.
+    self.GolemRockStage =
+        "pickup"
+
+    self.GolemSupplyTarget =
+        nil
+
+    self.GolemBuildTarget =
+        nil
+
+    self.GolemPickupArrivedAt =
+        0
+
+    self.GolemBuildArrivedAt =
+        0
+
+    self.ProgressionOverridePart =
+        nil
+
+    self.ProgressionOverrideRoom =
+        nil
+
+    self.ProgressionOverrideTargetModel =
+        nil
+
+    self.ProgressionFrontierGoal =
+        nil
+
+    self.ProgressionFrontierTargetModel =
+        nil
+
+    self.CompletedProgressionCheckpoints =
+        {}
+
+    -- Lowest checkpoint room UIW is ever allowed to select again.
+    -- This only moves upward.
+    self.ProgressionFloorRoom =
+        1
+
+    self.ProgressionProbeRetryAt =
+        0
+
+    self.Destroyed =
+        false
+
+    self.Enabled =
+        true
+
+    self.AutoDodge =
+        true
+
+    self.AutoCombat =
+        true
+
+    self.AutoESP =
+        true
+
+    -- Single behavior profile: the original anti-aggro logic is now permanent.
+    self.Mode = "Anti Aggro"
+    self.HUD:BindController(self)
+
+    return self
+end
+
+function UIWController:SetMode(_)
+    -- Compatibility shim for old external calls. Modes were removed in v49.
+    self.Mode = "Anti Aggro"
+end
+
+function UIWController:GetAlwaysMoveRoomEnemies()
+    if self.Mode ~= "Always Moving"
+        or not self.Character:IsAlive()
+    then
+        return {}, nil
+    end
+
+    local root = self.Character.Root
+    local enemies = self.Dungeon:GetAliveEnemies()
+    local nearest = nil
+    local nearestDistance = math.huge
+
+    for _, enemy in ipairs(enemies) do
+        if enemy.Root and enemy.Root.Parent and enemy.Humanoid and enemy.Humanoid.Health > 0 then
+            local distance = flatten(enemy.Root.Position - root.Position).Magnitude
+            if distance < nearestDistance then
+                nearestDistance = distance
+                nearest = enemy
+            end
+        end
+    end
+
+    if not nearest then
+        return {}, nil
+    end
+
+    local room = nearest.Room
+    local sameRoom = {}
+    for _, enemy in ipairs(enemies) do
+        if enemy.Room == room and enemy.Root and enemy.Root.Parent and enemy.Humanoid and enemy.Humanoid.Health > 0 then
+            table.insert(sameRoom, enemy)
+        end
+    end
+
+    return sameRoom, room
+end
+
+function UIWController:ResetAlwaysMoveGather(room)
+    self.AlwaysMoveGatherRoom = room
+    self.AlwaysMoveGatherPhase = "Sweep"
+    self.AlwaysMoveGatherStartedAt = os.clock()
+    self.AlwaysMovePulled = {}
+    self.AlwaysMoveRoomStartPosition = self.Character.Root.Position
+    self.AlwaysMoveGatherAnchor = nil
+    self.AlwaysMoveLastSweepTarget = nil
+end
+
+function UIWController:UpdateAlwaysMoveGatherState()
+    if self.Mode ~= "Always Moving" or not self.Character:IsAlive() then
+        return {}, nil, "Off"
+    end
+
+    local enemies, room = self:GetAlwaysMoveRoomEnemies()
+    if not room or #enemies == 0 then
+        self.AlwaysMoveGatherRoom = nil
+        self.AlwaysMoveGatherPhase = "Sweep"
+        self.AlwaysMovePulled = {}
+        self.AlwaysMoveGatherAnchor = nil
+        self.AlwaysMoveLastSweepTarget = nil
+        return enemies, room, "Empty"
+    end
+
+    if self.AlwaysMoveGatherRoom ~= room or not self.AlwaysMoveRoomStartPosition then
+        self:ResetAlwaysMoveGather(room)
+    end
+
+    local now = os.clock()
+    local rootPos = self.Character.Root.Position
+    local aliveModels = {}
+    local unpulled = 0
+
+    for _, enemy in ipairs(enemies) do
+        aliveModels[enemy.Model] = true
+        local distance = flatten(enemy.Root.Position - rootPos).Magnitude
+        if distance <= CONFIG.AlwaysMoveAggroVisitRange then
+            self.AlwaysMovePulled[enemy.Model] = true
+        end
+        if not self.AlwaysMovePulled[enemy.Model] then
+            unpulled = unpulled + 1
+        end
+    end
+
+    for model in pairs(self.AlwaysMovePulled) do
+        if not aliveModels[model] then
+            self.AlwaysMovePulled[model] = nil
+        end
+    end
+
+    if self.AlwaysMoveGatherPhase == "Kill" and unpulled > 0 then
+        -- A late spawn or a mob that never actually came with the pack reopens the sweep.
+        self.AlwaysMoveGatherPhase = "Sweep"
+        self.AlwaysMoveGatherStartedAt = now
+        self.AlwaysMoveGatherAnchor = nil
+    end
+
+    if self.AlwaysMoveGatherPhase == "Sweep" then
+        local sweepElapsed = now - self.AlwaysMoveGatherStartedAt
+        if unpulled == 0 or sweepElapsed >= CONFIG.AlwaysMoveSweepTimeout then
+            -- The deepest point reached becomes the kite spot. Mobs that were tagged on
+            -- the run forward now have one common destination: the player at this anchor.
+            self.AlwaysMoveGatherPhase = "Collapse"
+            self.AlwaysMoveGatherStartedAt = now
+            self.AlwaysMoveGatherAnchor = rootPos
+            self.Route:InvalidateGoal()
+        end
+    end
+
+    if self.AlwaysMoveGatherPhase == "Collapse" then
+        local packed = true
+        for _, enemy in ipairs(enemies) do
+            local distance = flatten(enemy.Root.Position - rootPos).Magnitude
+            if distance > CONFIG.AlwaysMovePackRadius then
+                packed = false
+                break
+            end
+        end
+
+        if packed or now - self.AlwaysMoveGatherStartedAt >= CONFIG.AlwaysMoveGatherTimeout then
+            self.AlwaysMoveGatherPhase = "Kill"
+            self.AlwaysMoveGatherStartedAt = now
+            self.Route:InvalidateGoal()
+        end
+    end
+
+    return enemies, room, self.AlwaysMoveGatherPhase
+end
+
+function UIWController:GetAlwaysMoveSweepTarget(enemies)
+    if not enemies or #enemies == 0 then
+        return nil
+    end
+
+    local rootPos = self.Character.Root.Position
+    local startPos = self.AlwaysMoveRoomStartPosition or rootPos
+    local best, bestScore = nil, -math.huge
+
+    -- Forward bias: prefer mobs deeper from where this room pull started, while
+    -- still slightly favoring a reachable nearby lane. This prevents ping-ponging
+    -- between mobs behind the player and keeps the pull advancing through the room.
+    for _, enemy in ipairs(enemies) do
+        if not self.AlwaysMovePulled[enemy.Model] then
+            local depth = flatten(enemy.Root.Position - startPos).Magnitude
+            local fromHere = flatten(enemy.Root.Position - rootPos).Magnitude
+            local score = depth * 1.35 - fromHere * 0.25
+            if score > bestScore then
+                bestScore = score
+                best = enemy
+            end
+        end
+    end
+
+    if best then
+        self.AlwaysMoveLastSweepTarget = best.Model
+        return best
+    end
+
+    -- Everyone has been tagged; retain a live target for facing/HUD until collapse.
+    local farthest, farthestDistance = nil, -1
+    for _, enemy in ipairs(enemies) do
+        local distance = flatten(enemy.Root.Position - rootPos).Magnitude
+        if distance > farthestDistance then
+            farthestDistance = distance
+            farthest = enemy
+        end
+    end
+    return farthest
+end
+
+function UIWController:ShouldDelayAlwaysMoveAttack()
+    if self.Mode ~= "Always Moving" then
+        return false
+    end
+
+    local enemies, _, phase = self:UpdateAlwaysMoveGatherState()
+    if #enemies <= 1 then
+        return false
+    end
+
+    -- Never spend the room-clear burst while still pulling or while the pack is
+    -- strung out. Once phase becomes Kill, combat is released on the whole clump.
+    return phase ~= "Kill"
+end
+
+function UIWController:RefreshWorld()
+    self.Character:Refresh()
+    self.Dungeon:Refresh()
+
+    if self.Character.Humanoid then
+        self.Character.Humanoid.WalkSpeed =
+            CONFIG.WalkSpeed
+    end
+end
+
+function UIWController:ClearDeathConnection()
+    if self.CurrentEnemyDeathConnection then
+        pcall(function()
+            self.CurrentEnemyDeathConnection:
+                Disconnect()
+        end)
+
+        self.CurrentEnemyDeathConnection =
+            nil
+    end
+end
+
+function UIWController:ForceNextTarget()
+    self:ClearDeathConnection()
+
+    self.CurrentEnemy =
+        nil
+
+    self.CurrentEnemyModel =
+        nil
+
+    self.Dungeon.LastEnemyRefresh =
+        0
+
+    self.Route:
+        InvalidateGoal()
+
+    local nextEnemy =
+        self.Dungeon:
+        GetNearestEnemy(
+            self.Character.Root.Position
+        )
+
+    if nextEnemy then
+        self:SetTarget(
+            nextEnemy
+        )
+    end
+end
+
+function UIWController:SetTarget(
+    enemy
+)
+    local nextModel =
+        enemy
+        and enemy.Model
+        or nil
+
+    local targetChanged =
+        nextModel
+        ~= self.CurrentEnemyModel
+
+    if targetChanged then
+        self:ClearDeathConnection()
+    end
+
+    self.CurrentEnemy =
+        enemy
+
+    self.CurrentEnemyModel =
+        nextModel
+
+    self.TargetHealth:
+        SetTarget(
+            enemy
+        )
+
+    if targetChanged then
+        self.ProgressionFrontierGoal =
+            nil
+
+        self.ProgressionFrontierTargetModel =
+            nil
+
+        self.Route:
+            InvalidateGoal()
+
+        if enemy
+            and enemy.Humanoid
+        then
+            self.CurrentEnemyDeathConnection =
+                enemy.Humanoid.Died:
+                Connect(function()
+                    task.defer(function()
+                        if self.Destroyed then
+                            return
+                        end
+
+                        self:ForceNextTarget()
+                    end)
+                end)
+        end
+    end
+end
+
+function UIWController:SelectTarget()
+    if not self.Character:IsAlive() then
+        return nil
+    end
+
+    local selected = nil
+
+    if self.Mode == "Always Moving" then
+        local roomEnemies, _, phase = self:UpdateAlwaysMoveGatherState()
+        if phase == "Sweep" then
+            selected = self:GetAlwaysMoveSweepTarget(roomEnemies)
+        else
+            -- During Collapse/Kill, lock the closest member of the pack for facing
+            -- and combat. Movement itself is handled by the gather anchor below.
+            local nearestDistance = math.huge
+            local root = self.Character.Root
+            for _, enemy in ipairs(roomEnemies) do
+                local distance = flatten(enemy.Root.Position - root.Position).Magnitude
+                if distance < nearestDistance then
+                    nearestDistance = distance
+                    selected = enemy
+                end
+            end
+        end
+    else
+        selected = self.Dungeon:GetNearestEnemy(
+            self.Character.Root.Position
+        )
+    end
+
+    if selected then
+        if selected.Model ~= self.CurrentEnemyModel then
+            self:SetTarget(selected)
+        else
+            self.CurrentEnemy = selected
+            self.TargetHealth:SetTarget(selected)
+        end
+    elseif self.CurrentEnemy then
+        self:SetTarget(nil)
+    end
+
+    return selected
+end
+
+function UIWController:IsCrystalGolemFight()
+    local enemy =
+        self.CurrentEnemy
+
+    if not enemy
+        or not enemy.Model
+        or not enemy.Model.Parent
+    then
+        return false
+    end
+
+    return normalizeEnemyName(
+        enemy.Model.Name
+    ) == "crystal golem"
+end
+
+function UIWController:ResetCrystalGolemMechanicState()
+    self.GolemRockStage =
+        "pickup"
+
+    self.GolemSupplyTarget =
+        nil
+
+    self.GolemBuildTarget =
+        nil
+
+    self.GolemPickupArrivedAt =
+        0
+
+    self.GolemBuildArrivedAt =
+        0
+end
+
+function UIWController:GetCrystalGolemFallingCrystal()
+    if not self.Character:IsAlive()
+    then
+        return nil
+    end
+
+    local root =
+        self.Character.Root
+
+    local bestPart =
+        nil
+
+    local bestDistance =
+        math.huge
+
+    for _, child in ipairs(
+        Workspace:GetChildren()
+    ) do
+        if string.lower(
+            child.Name or ""
+        ) == "firstbosscrystaldrop"
+        then
+            local candidate =
+                child:IsA("BasePart")
+                and child
+                or child:FindFirstChildWhichIsA(
+                    "BasePart",
+                    true
+                )
+
+            if candidate
+                and candidate.Parent
+            then
+                local distance =
+                    flatten(
+                        candidate.Position
+                        - root.Position
+                    ).Magnitude
+
+                if distance
+                    < bestDistance
+                then
+                    bestDistance =
+                        distance
+
+                    bestPart =
+                        candidate
+                end
+            end
+        end
+    end
+
+    return bestPart
+end
+
+function UIWController:GetCrystalGolemCleanseBubble()
+    if not self.Character:IsAlive()
+    then
+        return nil
+    end
+
+    local root =
+        self.Character.Root
+
+    local safeZones =
+        Workspace:
+        FindFirstChild(
+            "firstBossSafeZones"
+        )
+
+    if not safeZones then
+        return nil
+    end
+
+    local bestPart =
+        nil
+
+    local bestDistance =
+        math.huge
+
+    local function isActiveBubble(part)
+        if not part
+            or not part:IsA("BasePart")
+        then
+            return false
+        end
+
+        local light =
+            part:
+            FindFirstChildWhichIsA(
+                "PointLight",
+                true
+            )
+
+        -- Live verified during Falling Crystal:
+        -- inactive marker = Transparency 1, PointLight.Enabled false
+        -- active marker   = Transparency 0, green ForceField, PointLight.Enabled true
+        if light
+            and light.Enabled
+        then
+            return true
+        end
+
+        return part.Transparency <= 0.25
+            and part.Material
+                == Enum.Material.ForceField
+            and part.Color.G >= 0.65
+            and part.Color.R <= 0.35
+    end
+
+    -- Only top-level zone Parts are destinations. Their nested duplicate Parts
+    -- occupy the same coordinates and should never create duplicate choices.
+    for _, child in ipairs(
+        safeZones:GetChildren()
+    ) do
+        if isActiveBubble(child) then
+            local distance =
+                flatten(
+                    child.Position
+                    - root.Position
+                ).Magnitude
+
+            if distance
+                < bestDistance
+            then
+                bestDistance =
+                    distance
+
+                bestPart =
+                    child
+            end
+        end
+    end
+
+    return bestPart
+end
+
+function UIWController:GetCrystalGolemCleanseGoal()
+    local fallingCrystal =
+        self:GetCrystalGolemFallingCrystal()
+
+    if not fallingCrystal then
+        return nil,
+            nil
+    end
+
+    local bubble =
+        self:GetCrystalGolemCleanseBubble()
+
+    if not bubble then
+        return nil,
+            nil
+    end
+
+    return bubble.Position,
+        bubble
+end
+
+function UIWController:GetCrystalGolemBuiltWallCover()
+    if not self:IsCrystalGolemFight()
+        or not self.Character:IsAlive()
+    then
+        return nil,
+            nil
+    end
+
+    local buildZones =
+        Workspace:
+        FindFirstChild(
+            "firstBossBuildZones"
+        )
+
+    if not buildZones then
+        return nil,
+            nil
+    end
+
+    local root =
+        self.Character.Root
+
+    local bestSafeBox =
+        nil
+
+    local bestWall =
+        nil
+
+    local bestDistance =
+        math.huge
+
+    for _, wall in ipairs(
+        buildZones:GetChildren()
+    ) do
+        if wall:IsA("Model")
+            and string.lower(
+                wall.Name or ""
+            ) == "wallmodel"
+        then
+            local built =
+                wall:FindFirstChild(
+                    "built"
+                )
+
+            local safeBox =
+                wall:FindFirstChild(
+                    "safeBox",
+                    true
+                )
+
+            if built
+                and built:IsA("BoolValue")
+                and built.Value
+                and safeBox
+                and safeBox:IsA(
+                    "BasePart"
+                )
+            then
+                local distance =
+                    flatten(
+                        safeBox.Position
+                        - root.Position
+                    ).Magnitude
+
+                if distance
+                    < bestDistance
+                then
+                    bestDistance =
+                        distance
+
+                    bestSafeBox =
+                        safeBox
+
+                    bestWall =
+                        wall
+                end
+            end
+        end
+    end
+
+    return bestSafeBox,
+        bestWall
+end
+
+function UIWController:GetCrystalGolemSupplyTarget()
+    if not self:IsCrystalGolemFight()
+        or not self.Character:IsAlive()
+    then
+        return nil
+    end
+
+    local suppliesRoot =
+        Workspace:
+        FindFirstChild(
+            "firstBossSupplyModels"
+        )
+
+    if not suppliesRoot then
+        return nil
+    end
+
+    local root =
+        self.Character.Root
+
+    local bestPart =
+        nil
+
+    local bestDistance =
+        math.huge
+
+    for _, supplyModel in ipairs(
+        suppliesRoot:GetChildren()
+    ) do
+        if supplyModel:IsA("Model")
+            and supplyModel:
+                FindFirstChild(
+                    "buildingSupplies",
+                    true
+                )
+        then
+            local target =
+                supplyModel:
+                FindFirstChild(
+                    "mainPart",
+                    true
+                )
+                or supplyModel:
+                    FindFirstChildWhichIsA(
+                        "BasePart",
+                        true
+                    )
+
+            if target
+                and target:IsA(
+                    "BasePart"
+                )
+                and target.Parent
+            then
+                local distance =
+                    flatten(
+                        target.Position
+                        - root.Position
+                    ).Magnitude
+
+                if distance
+                    < bestDistance
+                then
+                    bestDistance =
+                        distance
+
+                    bestPart =
+                        target
+                end
+            end
+        end
+    end
+
+    return bestPart
+end
+
+function UIWController:GetCrystalGolemBuildTarget()
+    if not self:IsCrystalGolemFight()
+        or not self.Character:IsAlive()
+    then
+        return nil,
+            nil
+    end
+
+    local buildZones =
+        Workspace:
+        FindFirstChild(
+            "firstBossBuildZones"
+        )
+
+    if not buildZones then
+        return nil,
+            nil
+    end
+
+    local root =
+        self.Character.Root
+
+    local bestPart =
+        nil
+
+    local bestWall =
+        nil
+
+    local bestDistance =
+        math.huge
+
+    for _, wall in ipairs(
+        buildZones:GetChildren()
+    ) do
+        if wall:IsA("Model")
+            and string.lower(
+                wall.Name or ""
+            ) == "wallmodel"
+        then
+            local built =
+                wall:FindFirstChild(
+                    "built"
+                )
+
+            local beamPart =
+                wall:FindFirstChild(
+                    "beamPart",
+                    true
+                )
+
+            if built
+                and built:IsA("BoolValue")
+                and not built.Value
+                and beamPart
+                and beamPart:IsA(
+                    "BasePart"
+                )
+            then
+                local distance =
+                    flatten(
+                        beamPart.Position
+                        - root.Position
+                    ).Magnitude
+
+                if distance
+                    < bestDistance
+                then
+                    bestDistance =
+                        distance
+
+                    bestPart =
+                        beamPart
+
+                    bestWall =
+                        wall
+                end
+            end
+        end
+    end
+
+    return bestPart,
+        bestWall
+end
+
+function UIWController:IsCrystalGolemRockWallPhaseActive()
+    if not self:IsCrystalGolemFight()
+    then
+        return false
+    end
+
+    -- The supply models are populated only while the pickup/build mechanic is
+    -- available. After the Golem clears, the three Models remain but their
+    -- buildingSupplies descendants are removed (confirmed live).
+    local supply =
+        self:GetCrystalGolemSupplyTarget()
+
+    local buildTarget =
+        self:GetCrystalGolemBuildTarget()
+
+    return supply ~= nil
+        and buildTarget ~= nil
+end
+
+function UIWController:GetCrystalGolemRockWallGoal()
+    if not self:IsCrystalGolemFight()
+        or not self.Character:IsAlive()
+    then
+        self:
+        ResetCrystalGolemMechanicState()
+
+        return nil,
+            nil,
+            nil
+    end
+
+    -- `wallModel.built == true` is the authoritative live success flag.
+    -- Once any wall is built, immediately get behind that exact wall and stay.
+    local safeBox =
+        self:GetCrystalGolemBuiltWallCover()
+
+    if safeBox then
+        self.GolemRockStage =
+            "cover"
+
+        return safeBox.Position,
+            "CrystalGolemWallCover",
+            safeBox
+    end
+
+    if not self:
+        IsCrystalGolemRockWallPhaseActive()
+    then
+        self:
+        ResetCrystalGolemMechanicState()
+
+        return nil,
+            nil,
+            nil
+    end
+
+    local now =
+        os.clock()
+
+    if self.GolemRockStage
+        ~= "place"
+    then
+        self.GolemRockStage =
+            "pickup"
+    end
+
+    if self.GolemRockStage
+        == "pickup"
+    then
+        local target =
+            self.GolemSupplyTarget
+
+        if not target
+            or not target.Parent
+        then
+            target =
+                self:
+                GetCrystalGolemSupplyTarget()
+
+            self.GolemSupplyTarget =
+                target
+
+            self.GolemPickupArrivedAt =
+                0
+        end
+
+        if not target then
+            return nil,
+                nil,
+                nil
+        end
+
+        local distance =
+            flatten(
+                target.Position
+                - self.Character.Root.Position
+            ).Magnitude
+
+        if distance
+            <= CONFIG.GolemRockPickupRadius
+        then
+            if self.GolemPickupArrivedAt
+                <= 0
+            then
+                self.GolemPickupArrivedAt =
+                    now
+
+            elseif now
+                - self.GolemPickupArrivedAt
+                >= CONFIG.GolemRockPickupDwell
+            then
+                self.GolemRockStage =
+                    "place"
+
+                self.GolemSupplyTarget =
+                    nil
+
+                self.GolemPickupArrivedAt =
+                    0
+
+                self.GolemBuildTarget =
+                    nil
+
+                self.GolemBuildArrivedAt =
+                    0
+
+                self.Route:
+                    InvalidateGoal()
+
+                local buildTarget =
+                    self:
+                    GetCrystalGolemBuildTarget()
+
+                self.GolemBuildTarget =
+                    buildTarget
+
+                if buildTarget then
+                    return buildTarget.Position,
+                        "CrystalGolemRockPlace",
+                        buildTarget
+                end
+            end
+        else
+            self.GolemPickupArrivedAt =
+                0
+        end
+
+        return target.Position,
+            "CrystalGolemRockPickup",
+            target
+    end
+
+    local buildTarget =
+        self.GolemBuildTarget
+
+    if not buildTarget
+        or not buildTarget.Parent
+    then
+        buildTarget =
+            self:
+            GetCrystalGolemBuildTarget()
+
+        self.GolemBuildTarget =
+            buildTarget
+
+        self.GolemBuildArrivedAt =
+            0
+    end
+
+    if not buildTarget then
+        self:
+        ResetCrystalGolemMechanicState()
+
+        return nil,
+            nil,
+            nil
+    end
+
+    local distance =
+        flatten(
+            buildTarget.Position
+            - self.Character.Root.Position
+        ).Magnitude
+
+    if distance
+        <= CONFIG.GolemRockPlaceRadius
+    then
+        if self.GolemBuildArrivedAt
+            <= 0
+        then
+            self.GolemBuildArrivedAt =
+                now
+
+        elseif now
+            - self.GolemBuildArrivedAt
+            >= CONFIG.GolemRockPlaceRetry
+        then
+            -- If `built` did not flip after dwelling on the orange build zone,
+            -- assume the pickup did not register and make another pickup pass.
+            self:
+            ResetCrystalGolemMechanicState()
+
+            self.Route:
+                InvalidateGoal()
+
+            local retrySupply =
+                self:
+                GetCrystalGolemSupplyTarget()
+
+            if retrySupply then
+                self.GolemSupplyTarget =
+                    retrySupply
+
+                return retrySupply.Position,
+                    "CrystalGolemRockPickup",
+                    retrySupply
+            end
+
+            return nil,
+                nil,
+                nil
+        end
+    else
+        self.GolemBuildArrivedAt =
+            0
+    end
+
+    return buildTarget.Position,
+        "CrystalGolemRockPlace",
+        buildTarget
+end
+
+
+function UIWController:GetActiveSafeZone()
+    if not self.Character:IsAlive()
+    then
+        return nil,
+            nil,
+            nil
+    end
+
+    local root = self.Character.Root
+    local bestPart = nil
+    local bestState = nil
+    local bestDistance = math.huge
+
+    local function consider(
+        part,
+        state
+    )
+        if not part
+            or not part.Parent
+            or not part:IsA("BasePart")
+            or not isSafeZoneDestinationPart(
+                part
+            )
+        then
+            return
+        end
+
+        if not isStandaloneSafeZonePart(
+            part
+        )
+            and part.Transparency >= 0.98
+        then
+            return
+        end
+
+        local distance =
+            flatten(
+                part.Position
+                - root.Position
+            ).Magnitude
+
+        if distance < bestDistance then
+            bestDistance = distance
+            bestPart = part
+            bestState = state
+        end
+    end
+
+    for _, child in ipairs(
+        Workspace:GetChildren()
+    ) do
+        local lower =
+            string.lower(
+                child.Name or ""
+            )
+
+        if child:IsA("Model")
+            and SAFE_ZONE_SINGLE_CONTAINER_NAMES[
+                lower
+            ]
+        then
+            for _, descendant in ipairs(
+                child:GetDescendants()
+            ) do
+                if descendant:IsA("BasePart")
+                    and string.lower(
+                        descendant.Name or ""
+                    ) == "precast"
+                then
+                    consider(
+                        descendant,
+                        lower == "thirdbossmemorysafezone"
+                            and "MemorySafeZone"
+                            or "SafeZone"
+                    )
+                end
+            end
+
+        elseif child:IsA("Model")
+            and SAFE_ZONE_MULTI_CONTAINER_NAMES[
+                lower
+            ]
+        then
+            for _, descendant in ipairs(
+                child:GetDescendants()
+            ) do
+                if descendant:IsA("BasePart")
+                    and string.lower(
+                        descendant.Name or ""
+                    ) == "precast"
+                then
+                    consider(
+                        descendant,
+                        "MassSafeZone"
+                    )
+                end
+            end
+
+        elseif isStandaloneSafeZonePart(
+            child
+        ) then
+            consider(
+                child,
+                "SafeSpotCircle"
+            )
+        end
+    end
+
+    return bestPart,
+        bestState,
+        bestDistance
+end
+
+function UIWController:GetPriorityMechanicGoal()
+    local cleanseGoal,
+        cleansePart =
+        self:GetCrystalGolemCleanseGoal()
+
+    if cleanseGoal then
+        local distance =
+            flatten(
+                cleanseGoal
+                - self.Character.Root.Position
+            ).Magnitude
+
+        return cleanseGoal,
+            "FallingCrystalCleanse",
+            cleansePart,
+            distance
+    end
+
+    local safePart,
+        safeState,
+        safeDistance =
+        self:GetActiveSafeZone()
+
+    if safePart then
+        return safePart.Position,
+            safeState,
+            safePart,
+            safeDistance
+    end
+
+    local golemGoal,
+        golemState,
+        golemPart =
+        self:GetCrystalGolemRockWallGoal()
+
+    if golemGoal then
+        local distance =
+            flatten(
+                golemGoal
+                - self.Character.Root.Position
+            ).Magnitude
+
+        return golemGoal,
+            golemState,
+            golemPart,
+            distance
+    end
+
+    return nil,
+        nil,
+        nil,
+        nil
+end
+
+
+function UIWController:GetGoal()
+    local mechanicGoal =
+        self:GetPriorityMechanicGoal()
+
+    if mechanicGoal then
+        return mechanicGoal
+    end
+
+    local root =
+        self.Character.Root
+
+    local overridePart =
+        self.ProgressionOverridePart
+
+    -- A selected checkpoint remains authoritative until physically reached.
+    if overridePart
+        and overridePart.Parent
+    then
+        local distance =
+            flatten(
+                overridePart.Position
+                - root.Position
+            ).Magnitude
+
+        if distance
+            > CONFIG.ProgressionCheckpointReachDistance
+        then
+            return overridePart.Position
+        end
+
+        local completedRoom =
+            self.ProgressionOverrideRoom
+
+        if completedRoom then
+            self.CompletedProgressionCheckpoints[
+                completedRoom
+            ] = true
+
+            -- Do not advance progression beyond a room that still owns a live
+            -- target. Boss roots can sit on another vertical layer and Roblox PFS
+            -- may report NoPath until the room transition/entry geometry is used.
+            local nextFloor =
+                completedRoom + 1
+
+            local liveEnemyRoom =
+                self.CurrentEnemy
+                and self.CurrentEnemy.Humanoid
+                and self.CurrentEnemy.Humanoid.Health > 0
+                and tonumber(self.CurrentEnemy.Room)
+                or nil
+
+            if liveEnemyRoom
+                and liveEnemyRoom >= 1
+                and liveEnemyRoom <= 9
+            then
+                nextFloor =
+                    math.min(
+                        nextFloor,
+                        liveEnemyRoom
+                    )
+            end
+
+            self.ProgressionFloorRoom =
+                math.max(
+                    self.ProgressionFloorRoom,
+                    nextFloor
+                )
+
+            self.Dungeon.LastKnownRoom =
+                math.max(
+                    self.Dungeon.LastKnownRoom,
+                    nextFloor
+                )
+        end
+
+        self.ProgressionOverridePart =
+            nil
+
+        self.ProgressionOverrideRoom =
+            nil
+
+        self.ProgressionOverrideTargetModel =
+            nil
+
+        self.ProgressionProbeRetryAt =
+            0
+
+        self.Route:
+            InvalidateGoal()
+
+    elseif overridePart then
+        self.ProgressionOverridePart =
+            nil
+
+        self.ProgressionOverrideRoom =
+            nil
+
+        self.ProgressionOverrideTargetModel =
+            nil
+
+        self.ProgressionProbeRetryAt =
+            0
+    end
+
+    local frontierGoal =
+        self.ProgressionFrontierGoal
+
+    if frontierGoal then
+        local frontierTargetStillValid =
+            self.CurrentEnemy
+            and self.CurrentEnemy.Model
+                == self.ProgressionFrontierTargetModel
+            and self.CurrentEnemy.Humanoid
+            and self.CurrentEnemy.Humanoid.Health > 0
+
+        if not frontierTargetStillValid then
+            self.ProgressionFrontierGoal = nil
+            self.ProgressionFrontierTargetModel = nil
+        else
+            local frontierDistance =
+                flatten(
+                    frontierGoal - root.Position
+                ).Magnitude
+
+            if frontierDistance
+                > CONFIG.ProgressionFrontierReachDistance
+            then
+                return frontierGoal
+            end
+
+            self.ProgressionFrontierGoal = nil
+            self.ProgressionFrontierTargetModel = nil
+            self.ProgressionProbeRetryAt = 0
+            self.Route:InvalidateGoal()
+        end
+    end
+
+    if self.Mode == "Always Moving" then
+        local _, _, phase = self:UpdateAlwaysMoveGatherState()
+        if phase == "Collapse"
+            and self.AlwaysMoveGatherAnchor
+        then
+            return self.AlwaysMoveGatherAnchor
+        end
+    end
+
+    if self.CurrentEnemy
+        and self.CurrentEnemy.Root
+        and self.CurrentEnemy.Root.Parent
+        and self.CurrentEnemy.Humanoid
+        and self.CurrentEnemy.Humanoid.Health > 0
+    then
+        local enemy =
+            self.CurrentEnemy
+
+        -- Defensive invariant: stale/reinjected progression state must never sit
+        -- ahead of the room containing the current live enemy.
+        local enemyRoomNumber =
+            tonumber(enemy.Room)
+
+        if enemyRoomNumber
+            and enemyRoomNumber >= 1
+            and enemyRoomNumber <= 9
+            and self.ProgressionFloorRoom > enemyRoomNumber
+        then
+            self.ProgressionFloorRoom =
+                enemyRoomNumber
+
+            if self.Dungeon.LastKnownRoom > enemyRoomNumber then
+                self.Dungeon.LastKnownRoom =
+                    enemyRoomNumber
+            end
+        end
+
+        local enemyGoal =
+            enemy.Root.Position
+
+        local noPathToThisEnemy =
+            self.Route.LastPathStatus
+                == "NoPath"
+            and not self.Route.FallbackRoute
+            and self.Route.LastNoPathGoal
+            and (
+                self.Route.LastNoPathGoal
+                - enemyGoal
+            ).Magnitude
+                <= CONFIG.GoalChangeThreshold
+
+        if noPathToThisEnemy
+            and enemy.Room
+            and enemy.Room > 1
+        then
+            local now =
+                os.clock()
+
+            if now
+                >= self.ProgressionProbeRetryAt
+            then
+                self.ProgressionProbeRetryAt =
+                    now
+                    + CONFIG.ProgressionProbeRetry
+
+                local maximumRoom =
+                    enemy.Room == 999
+                    and 9
+                    or math.min(
+                        enemy.Room,
+                        9
+                    )
+
+                local minimumRoom =
+                    math.min(
+                        math.max(
+                            self.ProgressionFloorRoom,
+                            1
+                        ),
+                        maximumRoom
+                    )
+
+                local checkpoint,
+                    checkpointRoom =
+                    self.Dungeon:
+                    GetNextReachableCheckpointTowardRoom(
+                        root.Position,
+                        enemy.Room,
+                        minimumRoom,
+                        self.CompletedProgressionCheckpoints,
+                        self.Route
+                    )
+
+                if checkpoint then
+                    -- Raise the floor AS SOON AS a forward checkpoint is chosen.
+                    -- Even if the route later invalidates, the next probe can
+                    -- never select an older room.
+                    self.ProgressionFloorRoom =
+                        math.max(
+                            self.ProgressionFloorRoom,
+                            checkpointRoom
+                        )
+
+                    self.ProgressionOverridePart =
+                        checkpoint
+
+                    self.ProgressionOverrideRoom =
+                        checkpointRoom
+
+                    self.ProgressionOverrideTargetModel =
+                        enemy.Model
+
+                    self.Route:
+                        InvalidateGoal()
+
+                    return checkpoint.Position
+                end
+
+                -- The room checkpoint can be only a marker, not the actual
+                -- transition/entrance. If the boss root itself is unreachable,
+                -- walk a chain of locally reachable ground anchors toward it.
+                -- This follows ramps, corridors and descents instead of looping
+                -- PFS against an impossible straight-through-floor goal.
+                local frontier =
+                    self.Route:
+                    FindReachableFrontierGoal(
+                        root.Position,
+                        enemyGoal
+                    )
+
+                if frontier then
+                    self.ProgressionFrontierGoal =
+                        frontier
+
+                    self.ProgressionFrontierTargetModel =
+                        enemy.Model
+
+                    self.Route:
+                        InvalidateGoal()
+
+                    return frontier
+                end
+            end
+        else
+            self.ProgressionProbeRetryAt =
+                0
+        end
+
+        return enemyGoal
+    end
+
+    return self.Dungeon:
+        GetProgressionGoal(
+            root.Position
+        )
+end
+
+function UIWController:GetTargetYaw()
+    local enemy =
+        self.CurrentEnemy
+
+    if enemy
+        and enemy.Root
+        and enemy.Root.Parent
+    then
+        local direction =
+            flatten(
+                enemy.Root.Position
+                - self.Character
+                    .Root.Position
+            )
+
+        if direction.Magnitude
+            > 0.05
+        then
+            return directionToYaw(
+                direction
+            )
+        end
+    end
+
+    return self.Character.DesiredYaw
+        or directionToYaw(
+            self.Character.Root
+                .CFrame.LookVector
+        )
+end
+
+function UIWController:GetStuckRecovery(
+    routeDirection,
+    targetYaw,
+    fallbackDirection
+)
+    local now =
+        os.clock()
+
+    local root =
+        self.Character.Root
+
+    local position =
+        root.Position
+
+    if now < self.RecoveryUntil
+        and self.RecoveryDirection.Magnitude > 0
+    then
+        return self.RecoveryDirection,
+            true,
+            self.HardRecoveryActive == true
+    end
+
+    self.HardRecoveryActive =
+        false
+
+    if not self.LastProgressPosition then
+        self.LastProgressPosition =
+            position
+
+        self.LastProgressTime =
+            now
+
+        return nil, false, false
+    end
+
+    local progress =
+        flatten(
+            position
+            - self.LastProgressPosition
+        ).Magnitude
+
+    if progress
+        >= CONFIG.StuckProgressDistance
+    then
+        self.LastProgressPosition =
+            position
+
+        self.LastProgressTime =
+            now
+
+        return nil, false, false
+    end
+
+    if self.LastCommandedMovement.Magnitude
+        < 0.5
+    then
+        self.LastProgressPosition =
+            position
+
+        self.LastProgressTime =
+            now
+
+        return nil, false, false
+    end
+
+    local elapsed =
+        now
+        - self.LastProgressTime
+
+    local speed =
+        flatten(
+            root.AssemblyLinearVelocity
+        ).Magnitude
+
+    -- Blockcast cannot detect a collider we already start inside.
+    if speed
+            <= CONFIG.StuckEarlyVelocity
+        and elapsed
+            >= CONFIG.StuckEarlyTime
+    then
+        local basis =
+            unit(
+                flatten(
+                    routeDirection
+                )
+            )
+
+        if basis.Magnitude <= 0 then
+            basis =
+                unit(
+                    flatten(
+                        fallbackDirection
+                        or Vector3.zero
+                    )
+                )
+        end
+
+        local overlapEscape,
+            overlapCount =
+            self.Geometry:
+            GetStartingOverlapEscape(
+                basis,
+                targetYaw
+            )
+
+        if overlapEscape
+            and overlapCount > 0
+        then
+            self.Character.Humanoid:
+                ChangeState(
+                    Enum.HumanoidStateType.Jumping
+                )
+
+            self.RecoveryDirection =
+                overlapEscape
+
+            self.RecoveryUntil =
+                now
+                + CONFIG.StuckRecoveryDuration
+
+            self.HardRecoveryActive =
+                true
+
+            self.LastProgressPosition =
+                position
+
+            self.LastProgressTime =
+                now
+
+            self.Route:
+                ForceRepath(
+                    self:GetGoal()
+                )
+
+            return overlapEscape,
+                true,
+                true
+        end
+    end
+
+    if elapsed
+        < CONFIG.PathStuckRepathTime
+    then
+        return nil, false, false
+    end
+
+    -- No left/right "unstuck" steering. One jump handles a small lip; the
+    -- replacement path is calculated asynchronously while the old path remains.
+    if self.Character.Humanoid.FloorMaterial
+            ~= Enum.Material.Air
+        and now
+            - self.LastNavigationAutoJump
+            >= CONFIG.NavigationAutoJumpCooldown
+    then
+        self.Character.Humanoid:
+            ChangeState(
+                Enum.HumanoidStateType.Jumping
+            )
+
+        self.LastNavigationAutoJump =
+            now
+    end
+
+    self.Route:
+        ForceRepath(
+            self:GetGoal()
+        )
+
+    self.LastProgressPosition =
+        position
+
+    self.LastProgressTime =
+        now
+
+    return nil, false, false
+end
+
+function UIWController:Step()
+    if self.Destroyed then
+        return
+    end
+
+    local now = os.clock()
+
+    if now - self.LastWorldRefresh >= CONFIG.WorldRefreshInterval then
+        self.LastWorldRefresh = now
+        self:RefreshWorld()
+    end
+
+    if not self.Character:IsAlive() then
+        return
+    end
+
+    self.Hazards:RefreshCache(false)
+
+    self.ESP.Enabled = self.AutoESP
+    self.ESP:Update(false)
+
+    self:SelectTarget()
+    self.TargetHealth:Update()
+
+    if not self.Enabled then
+        self.Dodger.ForceRouteMovement =
+            false
+
+        self.Dodger.ForcedRegionPart =
+            nil
+
+        self.Character.Humanoid:Move(Vector3.zero, false)
+        self.LastCommandedMovement = Vector3.zero
+        if self.HUD.MovementArrow3D then
+            self.HUD:SetMovementArrow3DVisible(false)
+        end
+        self.HUD:SetStatus("IDLE", "disabled")
+        return
+    end
+
+    local targetYaw = self:GetTargetYaw()
+
+    local mechanicGoal,
+        mechanicState,
+        mechanicPart =
+        self:GetPriorityMechanicGoal()
+
+    local goal =
+        mechanicGoal
+        or self:GetGoal()
+
+    local mechanicActive =
+        mechanicGoal ~= nil
+
+    self.Dodger.ForceRouteMovement =
+        mechanicActive
+
+    self.Dodger.ForcedRegionPart =
+        nil
+
+    if mechanicActive
+        and mechanicPart
+        and mechanicPart:IsA(
+            "BasePart"
+        )
+        and (
+            mechanicState
+                == "FallingCrystalCleanse"
+            or mechanicState
+                == "CrystalGolemWallCover"
+            or mechanicState
+                == "MemorySafeZone"
+            or mechanicState
+                == "MassSafeZone"
+            or mechanicState
+                == "SafeZone"
+            or mechanicState
+                == "SafeSpotCircle"
+        )
+    then
+        self.Dodger.ForcedRegionPart =
+            mechanicPart
+    end
+
+    local routeDirection = Vector3.zero
+
+    if goal then
+        local routeReachDistance = nil
+
+        local progressionPart =
+            self.ProgressionOverridePart
+
+        if progressionPart
+            and progressionPart.Parent
+            and (
+                progressionPart.Position
+                - goal
+            ).Magnitude <= 0.05
+        then
+            routeReachDistance =
+                CONFIG.ProgressionCheckpointReachDistance
+        end
+
+        routeDirection = self.Route:GetSafeDirection(
+            goal,
+            targetYaw,
+            routeReachDistance
+        )
+    end
+
+    -- First evaluate navigation so TravelMode is current. Cooldown staging must
+    -- never stop a real pathfinder detour through a doorway/corridor.
+    self.Dodger.CooldownHold = false
+
+    local recoveryFallback
+
+    if mechanicActive then
+        recoveryFallback =
+            routeDirection
+    else
+        recoveryFallback =
+            self.Dodger:GetCombatPreferred(
+                routeDirection,
+                self.CurrentEnemy,
+                targetYaw
+            )
+    end
+
+    local cooldownHold = false
+    if self.AutoCombat
+        and not mechanicActive
+        and self.Mode ~= "Always Moving"
+    then
+        cooldownHold = self.Combat:ShouldHoldApproach(
+            self.CurrentEnemy,
+            self.Dodger.TravelMode
+        )
+    end
+
+    self.Dodger.CooldownHold = cooldownHold
+
+    local routeRepathHold =
+        self.Route.Computing
+        and routeDirection.Magnitude <= 0
+
+    if cooldownHold
+        or routeRepathHold
+    then
+        self.LastProgressPosition =
+            self.Character.Root.Position
+        self.LastProgressTime =
+            now
+        self.RecoveryUntil =
+            0
+        self.HardRecoveryActive =
+            false
+    end
+
+    local recoveryDirection, recovering, hardRecovering
+
+    if cooldownHold then
+        recoveryDirection = nil
+        recovering = false
+        hardRecovering = false
+    else
+        recoveryDirection, recovering, hardRecovering = self:GetStuckRecovery(
+            routeDirection,
+            targetYaw,
+            recoveryFallback
+        )
+    end
+
+    if recovering and recoveryDirection then
+        routeDirection = recoveryDirection
+    end
+
+    local movement = routeDirection
+    local yaw = targetYaw
+    local emergency = false
+    local dodging = false
+
+    -- Always Moving never accepts an idle combat frame. If pathfinding is between
+    -- routes, use a short safe direct step toward the pull target; the normal
+    -- dodger can immediately replace this direction when a hazard is present.
+    if self.Mode == "Always Moving"
+        and self.AlwaysMoveGatherPhase ~= "Collapse"
+        and not mechanicActive
+        and movement.Magnitude <= 0.05
+        and self.CurrentEnemy
+        and self.CurrentEnemy.Root
+        and self.CurrentEnemy.Root.Parent
+    then
+        local toward = unit(flatten(
+            self.CurrentEnemy.Root.Position - self.Character.Root.Position
+        ))
+
+        if toward.Magnitude > 0
+            and self.Geometry:IsDirectionClear(
+                toward,
+                CONFIG.AlwaysMoveDirectStep,
+                targetYaw
+            )
+            and self.Geometry:IsGroundPadded(
+                self.Character.Root.Position + toward * CONFIG.AlwaysMoveDirectStep,
+                CONFIG.EdgeHardPadding
+            )
+        then
+            movement = toward
+            self.Dodger.TravelMode = false
+        end
+    end
+
+    -- While the pulled mobs collapse onto the common anchor, keep circling the
+    -- anchor instead of standing still. This preserves the "Always Moving" rule
+    -- without dragging the pack away from the chosen kill spot.
+    if self.Mode == "Always Moving"
+        and self.AlwaysMoveGatherPhase == "Collapse"
+        and not mechanicActive
+        and movement.Magnitude <= 0.05
+        and self.AlwaysMoveGatherAnchor
+    then
+        local offset = flatten(self.Character.Root.Position - self.AlwaysMoveGatherAnchor)
+        local tangent
+        if offset.Magnitude > 1 then
+            tangent = unit(Vector3.new(-offset.Z, 0, offset.X))
+        else
+            local look = unit(flatten(self.Character.Root.CFrame.LookVector))
+            tangent = unit(Vector3.new(-look.Z, 0, look.X))
+        end
+
+        if tangent.Magnitude > 0
+            and self.Geometry:IsDirectionClear(tangent, 6, targetYaw)
+            and self.Geometry:IsGroundPadded(
+                self.Character.Root.Position + tangent * 6,
+                CONFIG.EdgeHardPadding
+            )
+        then
+            movement = tangent
+        end
+    end
+
+    if self.AutoDodge then
+        self.Dodger.ControllerMode = self.Mode
+        self.Dodger.GatherPhase = self.AlwaysMoveGatherPhase
+        movement, yaw, emergency, dodging = self.Dodger:Solve(
+            routeDirection,
+            self.CurrentEnemy,
+            targetYaw
+        )
+    end
+
+    -- Always Moving wide-pack orbit correction. This runs AFTER DodgeSolver:Solve,
+    -- making the outer-ring wrap authoritative over ordinary melee panic. Active
+    -- hitbox/projectile emergencies still keep priority through `emergency`.
+    if self.Mode == "Always Moving"
+        and not emergency
+        and self.Character
+        and self.Character.Root
+    then
+        local wrapDirection, _, _ = self.Dodger:GetAlwaysMovingPackWrap(
+            routeDirection,
+            targetYaw
+        )
+
+        if wrapDirection then
+            local shouldWrap = self.AlwaysMoveGatherPhase == "Collapse"
+                or self.AlwaysMoveGatherPhase == "Kill"
+                or self.Dodger.MeleePanicActive
+
+            if shouldWrap then
+                movement = wrapDirection
+                dodging = true
+            end
+        end
+    end
+
+    -- When physically wedged inside collidable map geometry, the explicit overlap
+    -- escape must win over ordinary route/dodge steering until the body is clear.
+    if hardRecovering and recoveryDirection then
+        movement = recoveryDirection
+        yaw = targetYaw
+        emergency = false
+        dodging = true
+    end
+
+    -- Normal movement, orbiting, casting and non-orientation dodges keep looking at
+    -- the locked enemy. Only a full-body emergency orientation may turn elsewhere.
+    if not emergency then
+        yaw = targetYaw
+    end
+
+    self.Character:SetYaw(yaw)
+    self.Character.Humanoid:Move(movement, false)
+    self.LastCommandedMovement = movement
+
+    -- World-space pathfinder indicator above the character. It follows the final
+    -- authoritative movement vector, so it also shows dodge/recovery overrides.
+    self.HUD:UpdateMovementArrow(
+        self.Character.Root,
+        movement,
+        dodging,
+        emergency,
+        recovering
+    )
+
+    -- Combat runs independently of movement state: UIW can cast while approaching
+    -- or actively dodging whenever the skill itself is usable/in range.
+    local attacked = false
+    local delayingGroupAttack =
+        self:ShouldDelayAlwaysMoveAttack()
+
+    if self.AutoCombat
+        and not delayingGroupAttack
+    then
+        attacked = self.Combat:Update(self.CurrentEnemy)
+    end
+
+    local overlaps = self.Hazards:GetCurrentOverlaps(yaw)
+    local meleeThreats = self.Dungeon:GetMeleeThreats(
+        self.Character.Root.Position,
+        CONFIG.MultiMeleeRadius
+    )
+
+    local nearestMelee = math.huge
+    local nearestMeleeClass = nil
+
+    for _, info in ipairs(meleeThreats) do
+        if info.Distance
+            < nearestMelee
+        then
+            nearestMelee =
+                info.Distance
+
+            nearestMeleeClass =
+                info.ThreatClass
+        end
+    end
+
+    if self.Mode == "Always Moving" and #overlaps == 0 then
+        if self.AlwaysMoveGatherPhase == "Sweep" then
+            self.HUD:SetStatus("PULL", "moving forward | aggroing every mob in room")
+        elseif self.AlwaysMoveGatherPhase == "Collapse" then
+            self.HUD:SetStatus("GROUP", "kiting pulled mobs into one kill spot")
+        elseif self.AlwaysMoveGatherPhase == "Kill" then
+            self.HUD:SetStatus("BURST", "pack grouped | releasing room-clear skills")
+        end
+    end
+
+    if #overlaps > 0 then
+        self.HUD:SetStatus(
+            "EMERGENCY",
+            "escaping active hitbox | still attacking when in range"
+        )
+
+    elseif mechanicActive then
+        local mechanicDistance =
+            mechanicPart
+            and math.floor(
+                flatten(
+                    mechanicPart.Position
+                    - self.Character.Root.Position
+                ).Magnitude
+            )
+            or 0
+
+        local mechanicLabel =
+            mechanicState
+            or "SafeZone"
+
+        local mechanicVerb =
+            "enter safe zone"
+
+        if mechanicState
+            == "CrystalGolemRockPickup"
+        then
+            mechanicVerb =
+                "pick up rock"
+
+        elseif mechanicState
+            == "CrystalGolemRockPlace"
+        then
+            mechanicVerb =
+                "place rock"
+
+        elseif mechanicState
+            == "CrystalGolemWallCover"
+        then
+            mechanicVerb =
+                "get behind wall"
+
+        elseif mechanicState
+            == "FallingCrystalCleanse"
+        then
+            mechanicVerb =
+                "cleanse falling crystal"
+        end
+
+        self.HUD:SetStatus(
+            "MECHANIC",
+            mechanicLabel
+                .. " | "
+                .. mechanicVerb
+                .. " "
+                .. tostring(
+                    mechanicDistance
+                )
+                .. " studs"
+        )
+
+    elseif self.Dodger.MeleePanicActive then
+        self.HUD:SetStatus(
+            "MELEE",
+            "panic "
+                .. string.lower(nearestMeleeClass or "melee")
+                .. " spacing | "
+                .. string.format("%.0f", nearestMelee)
+                .. " studs"
+        )
+    elseif recovering then
+        self.HUD:SetStatus(
+            "PATHING",
+            hardRecovering
+                and "unsticking | escaping overlapped map geometry"
+                or "unsticking | repathing"
+        )
+    elseif self.Route.FallbackRoute then
+        self.HUD:SetStatus(
+            "PATHING",
+            "PFS NoPath | ground-route fallback"
+        )
+    elseif dodging then
+        self.HUD:SetStatus(
+            "DODGING",
+            "real threat in movement corridor"
+        )
+    elseif cooldownHold then
+        self.HUD:SetStatus(
+            "PATHING",
+            self.Combat:GetHoldText()
+        )
+    elseif attacked then
+        self.HUD:SetStatus(
+            "COMBAT",
+            "engaging "
+                .. (
+                    self.CurrentEnemy
+                    and self.CurrentEnemy.Model.Name
+                    or "enemy"
+                )
+        )
+    elseif self.Route.Computing
+        and #self.Route.Waypoints == 0
+    then
+        self.HUD:SetStatus(
+            "PATHING",
+            "calculating initial dungeon route"
+        )
+    elseif self.ProgressionOverridePart
+        and self.ProgressionOverridePart.Parent
+    then
+        local checkpointDistance =
+            math.floor(
+                (
+                    self.ProgressionOverridePart.Position
+                    - self.Character.Root.Position
+                ).Magnitude
+                + 0.5
+            )
+
+        self.HUD:SetStatus(
+            "PROGRESSION",
+            "room "
+                .. tostring(
+                    self.ProgressionOverrideRoom
+                    or "?"
+                )
+                .. " checkpoint | "
+                .. tostring(
+                    checkpointDistance
+                )
+                .. " studs | floor "
+                .. tostring(
+                    self.ProgressionFloorRoom
+                )
+        )
+    elseif self.Dodger.TravelMode and movement.Magnitude > 0.05 then
+        local distance = 0
+        if goal then
+            distance = math.floor((goal - self.Character.Root.Position).Magnitude)
+        end
+
+        self.HUD:SetStatus(
+            "PATHING",
+            "NAVIGATION | "
+                .. tostring(distance)
+                .. " away"
+        )
+    elseif self.Dodger.TravelMode
+        and movement.Magnitude <= 0.05
+    then
+        local distance = 0
+        if goal then
+            distance = math.floor(
+                (goal - self.Character.Root.Position).Magnitude
+            )
+        end
+
+        self.HUD:SetStatus(
+            "PATHING",
+            "NAVIGATION | recalculating route | "
+                .. tostring(distance)
+                .. " away"
+        )
+
+    elseif movement.Magnitude > 0.05 then
+        local distance = 0
+        if goal then
+            distance = math.floor((goal - self.Character.Root.Position).Magnitude)
+        end
+
+        self.HUD:SetStatus(
+            "MOVING",
+            "approaching "
+                .. (
+                    self.CurrentEnemy
+                    and self.CurrentEnemy.Model.Name
+                    or "enemy"
+                )
+                .. " | "
+                .. tostring(distance)
+                .. " away"
+        )
+    else
+        self.HUD:SetStatus(
+            "RUNNING",
+            "holding safe ground"
+        )
+    end
+end
+
+function UIWController:Start()
+    self:RefreshWorld()
+
+    self.SelfAbilities:
+        Start()
+
+    self.Route:
+        Start()
+
+    self.Hazards:
+        Start()
+
+    self.Maid:Give(
+        LocalPlayer.CharacterAdded:
+        Connect(function()
+            task.wait(
+                0.75
+            )
+
+            self:ClearDeathConnection()
+
+            self.CurrentEnemy =
+                nil
+
+            self.CurrentEnemyModel =
+                nil
+
+            self.LastProgressPosition = nil
+            self.LastProgressTime = 0
+            self.LastCommandedMovement = Vector3.zero
+            self.RecoveryDirection = Vector3.zero
+            self.RecoveryUntil = 0
+            self.HardRecoveryActive = false
+            self.Dodger.MeleePanicActive = false
+            self.Dodger.ForceRouteMovement = false
+            self.Dodger.ForcedRegionPart = nil
+            self.Dodger.TravelMode = true
+
+            self:
+            ResetCrystalGolemMechanicState()
+
+            self.ProgressionOverridePart =
+                nil
+
+            self.ProgressionOverrideRoom =
+                nil
+
+            self.ProgressionOverrideTargetModel =
+                nil
+
+            self.ProgressionFrontierGoal =
+                nil
+
+            self.ProgressionFrontierTargetModel =
+                nil
+
+            table.clear(
+                self.CompletedProgressionCheckpoints
+            )
+
+            self.ProgressionFloorRoom =
+                1
+
+            self.ProgressionProbeRetryAt =
+                0
+
+            self.Dodger.TravelExitCandidateSince = 0
+
+            self.Route:
+                Reset()
+
+            self:RefreshWorld()
+        end)
+    )
+
+    self.Maid:Give(
+        UserInputService.InputBegan:
+        Connect(function(
+            input,
+            processed
+        )
+            if processed then
+                return
+            end
+
+            if input.KeyCode
+                == Enum.KeyCode.RightShift
+            then
+                self.HUD:
+                    Toggle()
+            end
+        end)
+    )
+
+    RunService:
+        BindToRenderStep(
+            "UIW_Movement",
+
+            Enum.RenderPriority
+                .Character.Value
+                + 1,
+
+            function()
+                self:Step()
+                self.HUD:
+                    Heartbeat()
+            end
+        )
+
+    self.Maid:Give(
+        function()
+            pcall(function()
+                RunService:
+                    UnbindFromRenderStep(
+                        "UIW_Movement"
+                    )
+            end)
+        end
+    )
+
+    log("Loaded")
+end
+
+function UIWController:Destroy()
+    if self.Destroyed then
+        return
+    end
+
+    self.Destroyed =
+        true
+
+    self:ClearDeathConnection()
+
+    self.Maid:
+        Clean()
+
+    self.SelfAbilities:
+        Destroy()
+
+    self.Hazards:
+        Destroy()
+
+    self.Route:
+        Destroy()
+
+    self.ESP:
+        Destroy()
+
+    self.TargetHealth:
+        Destroy()
+
+    self.HUD:
+        Destroy()
+
+    self.Character:
+        Destroy()
+
+    if self.Character.Humanoid then
+        pcall(function()
+            self.Character.Humanoid:
+                Move(
+                    Vector3.zero,
+                    false
+                )
+        end)
+    end
+
+    getgenv().UIW =
+        nil
+
+    getgenv().UNDERWORLD_AI =
+        nil
+
+    log("Destroyed")
+end
+
+local Controller =
+    UIWController.new()
+
+getgenv().UIW =
+    Controller
+
+getgenv().UNDERWORLD_AI =
+    Controller
+
+print("[UIW] NavigationV2-v43 loaded | modes + smooth navigation + smooth 3D movement arrow")
+
+Controller:Start()
