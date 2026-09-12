@@ -1,0 +1,978 @@
+-- Enchanted Forest Pathfinder v0.7.1 - Aurora Edition with Full Dodging
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local PathfindingService = game:GetService("PathfindingService")
+local TweenService = game:GetService("TweenService")
+local RS = game:GetService("ReplicatedStorage")
+local player = Players.LocalPlayer
+local env = getgenv and getgenv() or _G
+
+if env.EFPathfinder then pcall(function() env.EFPathfinder:Destroy() end) end
+
+local A = {
+    Version="0.7.1-aurora-dodge",
+    Running=false,
+    Alive=true,
+    Hazards={},
+    Connections={},
+    Config={
+        WalkSpeed=20,
+        AutoSkills=true,
+        CastRange=60,
+        Range=36,
+        BattleMageRange=40,
+        BattleMageKeepout=28,
+        AgentRadius=1.7,
+        Margin=2.8,
+        Horizon=2.0,
+        Tick=0.10,
+        ShowPath=true,
+        TerrainCacheTTL=0.18,
+        SafeSamples=6,
+        DangerSamples=10,
+        EmergencySamples=14,
+        SafeDirections=10,
+        DangerDirections=16,
+        EmergencyDirections=24,
+        HazardBroadphasePadding=9,
+        DetourHazardCap=12,
+        AutoRestart=true,
+        AutoStart=true,
+        AutoReplay=true
+    },
+    Stats={Warnings=0,Events=0,Plans=0,CastRequests=0,ConfirmedCasts=0,LastPlanMs=0,RelevantHazards=0,Hazards=0,PlannerMode="cruise",Detouring=false},
+    Route={},
+    RouteIndex=1,
+    Direction=Vector3.zero,
+    Status="Initializing...",
+    Target=nil,
+    GoalOverride=nil,
+    WasRunning=false,
+    DungeonEnded=false,
+    LastUIUpdate=0
+}
+env.EFPathfinder = A
+
+-- Utilities
+local ZERO=Vector3.zero
+local enemies={}
+local function flat(v) return Vector3.new(v.X,0,v.Z) end
+local function dist(a,b) return flat(a-b).Magnitude end
+local function unit(v) local f=flat(v); return f.Magnitude>0.001 and f.Unit or ZERO end
+local function charParts()
+    local c=player.Character
+    return c,c and c:FindFirstChildOfClass("Humanoid"),c and c:FindFirstChild("HumanoidRootPart")
+end
+local function connect(signal,fn) local c=signal:Connect(fn); table.insert(A.Connections,c); return c end
+local function now() return os.clock() end
+
+local controls
+pcall(function() controls=require(player.PlayerScripts:WaitForChild("PlayerModule",3)):GetControls() end)
+
+local timeSync
+pcall(function() timeSync=require(RS:FindFirstChild("timeSync")) end)
+local function effectTime() return timeSync and timeSync:GetTime() or workspace:GetServerTimeNow() end
+local function clockFromEffect(t) return now()+(t-effectTime()) end
+local function clockFromServer(t) return now()+(t-workspace:GetServerTimeNow()) end
+
+local function mapIsSupported()
+    if game.GameId~=9931749389 then return false end
+    for _,v in ipairs(workspace:GetChildren()) do
+        if v.Name=="dungeonName" and v:IsA("StringValue") and v.Value=="Enchanted Forest" then return true end
+    end
+    return false
+end
+
+local function checkDungeonEnded()
+    local playerGui = player:FindFirstChild("PlayerGui")
+    if playerGui then
+        for _,name in ipairs({"VictoryScreen","DefeatScreen","EndScreen","Results","DungeonComplete","DungeonFailed"}) do
+            local screen = playerGui:FindFirstChild(name)
+            if screen and screen:IsA("ScreenGui") and screen.Enabled then return true end
+        end
+        for _,gui in ipairs(playerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") then
+                for _,child in ipairs(gui:GetDescendants()) do
+                    if child:IsA("TextLabel") then
+                        local text = child.Text:lower()
+                        if text:find("victory") or text:find("defeat") or text:find("failed") or text:find("complete") or text:find("cleared") then return true end
+                    end
+                end
+            end
+        end
+    end
+    local _,h,r = charParts()
+    if h and h.Health > 0 then
+        if A.WasInDungeon and not mapIsSupported() then return true end
+    end
+    return false
+end
+
+function A:SetRunning(value)
+    if value and not mapIsSupported() then self.Status="Enchanted Forest required"; return false end
+    local _,h=charParts()
+    if value and (not h or h.Health<=0) then self.Status="Waiting for character..."; return false end
+    if value and h then
+        if not self.Running then self.PreviousSpeed=h.WalkSpeed;self.PreviousAutoRotate=h.AutoRotate;self.SpeedHumanoid=h end
+        h.WalkSpeed=self.Config.WalkSpeed
+    elseif self.SpeedHumanoid then
+        if self.SpeedHumanoid.Parent and self.SpeedHumanoid.WalkSpeed==self.Config.WalkSpeed then
+            self.SpeedHumanoid.WalkSpeed=self.PreviousSpeed or 16
+        end
+        if self.SpeedHumanoid.Parent then self.SpeedHumanoid.AutoRotate=self.PreviousAutoRotate~=false end
+        self.SpeedHumanoid=nil;self.PreviousSpeed=nil
+    end
+    if not value and self.AimConstraint then self.AimConstraint.Enabled=false end
+    if not value and self.Running then self.WasRunning=true end
+    self.Running=value; self.Direction=ZERO; self.Route={}; self.RouteIndex=1
+    self.RouteGeneration=(self.RouteGeneration or 0)+1; self.LastRouteAt=0
+    self.NavReprobeAt=0;self.StalledAt=now();self.LastPosition=nil;self.LastGoal=nil;self.Detour=nil;self.DetourGoal=nil
+    if controls then if value then controls:Disable() else controls:Enable() end end
+    if h then h:Move(ZERO,false) end
+    self.Status=value and "Finding a route" or "Ready - Press Start"
+    if value then self.WasInDungeon=true; self.DungeonEnded=false end
+    return true
+end
+
+function A:SetGoal(position) self.GoalOverride=position; self.Route={}; self.LastRouteAt=0 end
+
+local function livingOwner(h)
+    if not h.Owners then return true end
+    for _,hum in ipairs(h.Owners) do
+        if hum.Parent and hum:IsDescendantOf(workspace) and hum.Health>0 then return true end
+    end
+    return false
+end
+
+local function captureOwners(position,preferredName,explicit)
+    if explicit and typeof(explicit)=="Instance" then
+        local hum=explicit:FindFirstChildOfClass("Humanoid")
+        if hum then return {hum} end
+    end
+    local list={}
+    local closest,closestDistance
+    for _,e in ipairs(enemies) do
+        if e.Root.Parent and e.Humanoid.Health>0 and (not preferredName or e.Model.Name==preferredName) then
+            local d=position and dist(position,e.Root.Position) or 0
+            if not closestDistance or d<closestDistance then closest,closestDistance=e,d end
+        end
+    end
+    if not closest then
+        local fallback={}
+        for _,hum in ipairs(workspace:GetDescendants()) do
+            if hum:IsA("Humanoid") and hum.Health>0 and hum.Parent:FindFirstChild("enemyStyle")
+                and (not preferredName or hum.Parent.Name==preferredName) then table.insert(fallback,hum) end
+        end
+        return fallback
+    end
+    if position and closestDistance<8 then return {closest.Humanoid} end
+    local encounter=closest.Model.Parent
+    for _,e in ipairs(enemies) do
+        if e.Humanoid.Health>0 and e.Model.Parent==encounter and (not preferredName or e.Model.Name==preferredName) then table.insert(list,e.Humanoid) end
+    end
+    return list
+end
+
+local function clearance(h,p,t)
+    if not livingOwner(h) then return math.huge end
+    if t<(h.On or -math.huge) or t>(h.Off or math.huge) then return math.huge end
+    local cf,size,radius=h.CFrame,h.Size,h.Radius
+    if h.Predict then cf,size,radius=h.Predict(t) end
+    if not cf then return math.huge end
+    local margin=A.Config.Margin+(h.ExtraMargin or 0)
+    if h.Kind=="circle" then return dist(p,cf.Position)-(radius or 1)-margin end
+    local q=cf:PointToObjectSpace(Vector3.new(p.X,cf.Position.Y,p.Z))
+    local sx,sy,sz=size.X/2,size.Y/2,size.Z/2
+    local dx,dy,dz=math.abs(q.X)-sx,math.abs(q.Y)-sy,math.abs(q.Z)-sz
+    local outside=Vector3.new(math.max(dx,0),math.max(dy,0),math.max(dz,0)).Magnitude
+    return outside+math.min(math.max(dx,dy,dz),0)-margin
+end
+
+local function addHazard(h)
+    if not h.Owners then h.Owners=captureOwners(h.CFrame and h.CFrame.Position,h.OwnerName,h.Owner) end
+    table.insert(A.Hazards,h); A.Stats.Warnings+=1
+end
+
+local function refreshHazards(t)
+    for i=#A.Hazards,1,-1 do
+        local h=A.Hazards[i]
+        if not livingOwner(h) or (h.Off and h.Off<t) or (h.Part and not h.Part.Parent) then table.remove(A.Hazards,i) end
+    end
+end
+
+-- Effect packets
+pcall(function()
+    local utility=RS:FindFirstChild("Utility")
+    local bridge=require(utility:FindFirstChild("BridgeNet2"))
+    local action=bridge.ReferenceIdentifier("action")
+    local channel=bridge.ReferenceBridge("precastHitbox")
+    local c=channel:Connect(function(packet)
+        if not A.Alive then return end
+        local kind=packet[action]
+        if type(packet.startTime)~="number" or type(packet.delayUntilAttack)~="number" then return end
+        local hit=clockFromServer(packet.startTime+packet.delayUntilAttack)
+        if kind=="Circle" and typeof(packet.position)=="Vector3" and type(packet.radius)=="number" then
+            addHazard({Kind="circle",CFrame=CFrame.new(packet.position),Radius=packet.radius,On=hit-0.15,Off=hit+0.45,Source="warning circle"})
+        elseif kind=="Cube" and typeof(packet.cframe)=="CFrame" and typeof(packet.size)=="Vector3" then
+            addHazard({Kind="box",CFrame=packet.cframe,Size=packet.size,On=hit-0.15,Off=hit+0.45,Source="warning line"})
+        end
+    end)
+    table.insert(A.Connections,c)
+end)
+
+local function spinnerHazard(data,action)
+    local center=data[2].Position
+    local angle,total=data[8],data[4]
+    local arrive,spin,finish=clockFromEffect(data[5]),clockFromEffect(data[6]),clockFromEffect(data[7])
+    local length=action=="Second Boss Spinning Laser" and 450 or 50
+    return {Kind="box",Center=center,Owner=data[1],On=arrive,Off=finish,Source=action,Predict=function(t)
+        local grow=math.clamp((t-arrive)/math.max(spin-arrive,0.01),0,1)
+        local rot=angle+total*math.clamp((t-spin)/math.max(finish-spin,0.01),0,1)
+        return CFrame.new(center)*CFrame.Angles(0,math.rad(rot),0),Vector3.new(length*grow,5,2)
+    end}
+end
+
+local remote=RS:FindFirstChild("remotes") and RS.remotes:FindFirstChild("enchantedBossSpecficEvents")
+if remote then connect(remote.OnClientEvent,function(action,data)
+    if not A.Alive then return end
+    A.Stats.Events+=1
+    pcall(function()
+        if action=="First Boss Crystal Drop" then
+            for _,c in pairs(data[1]) do if c==player.Character then A.CrystalUntil=clockFromEffect(data[3])+0.2 end end
+        elseif action=="First Boss Player Pick Up Supplies" and data==player.Character then A.HasSupplies=true
+        elseif action=="First Boss Remove Player Supplies" and data==player.Character then A.HasSupplies=false
+        elseif action=="First Boss Remove All Player Supplies" then A.HasSupplies=false; A.WallChoice=nil
+        elseif action=="First Boss Shoot Spinning Orb" or action=="Second Boss Spinning Laser" then
+            addHazard(spinnerHazard(data,action))
+        elseif action=="Battle Mage Orb Shot" then
+            local length,duration,begin,finish,cf=data[1],data[2],clockFromEffect(data[3]),clockFromEffect(data[4]),data[5]
+            addHazard({Kind="circle",Owners=captureOwners(cf.Position,"Mushroom Battle Mage"),On=begin,Off=finish,Source=action,Predict=function(t)
+                return cf+cf.LookVector*(length*math.clamp((t-begin)/math.max(duration,0.01),0,1)),nil,5
+            end})
+        elseif action=="First Boss Orb Expand" then
+            local part=data:FindFirstChild("innerBall") or data.PrimaryPart
+            if part then addHazard({Kind="circle",OwnerName="Crystal Golem",CFrame=part.CFrame,Radius=21,On=now(),Off=now()+7,Part=part,Source=action}) end
+        elseif action=="Third Boss One Shot Beam" then
+            local hit=clockFromEffect(data[2])
+            addHazard({Kind="circle",OwnerName="Enchanted Forest Dragon",CFrame=data[1],Radius=26,On=hit-0.2,Off=hit+5.3,Source=action})
+        end
+    end)
+end) end
+
+-- Golem objects
+local golemObjects={}
+local function observeGolem(v)
+    if v.Name=="firstBossCrystal" or v.Name=="enchantedFirstBossFollowOrb" or v.Name=="firstBossSpinningRock" or v.Name=="firstBossCrystalDrop" then
+        if not golemObjects[v] then golemObjects[v]={Last=now(),Owners=captureOwners(nil,"Crystal Golem")} end
+    end
+end
+for _,v in ipairs(workspace:GetChildren()) do observeGolem(v) end
+connect(workspace.ChildAdded,function(v) task.defer(function() if A.Alive and v.Parent then observeGolem(v) end end) end)
+
+local function golemHazards(t,origin)
+    local out={}
+    for obj,record in pairs(golemObjects) do
+        if not obj.Parent then golemObjects[obj]=nil
+        elseif livingOwner(record) then
+            local name=obj.Name
+            if name=="firstBossCrystal" then
+                local p=obj:FindFirstChild("precast")
+                if p then table.insert(out,{Kind="circle",Owners=record.Owners,CFrame=p.CFrame,Radius=math.max(p.Size.Y,p.Size.Z)/2,Source="Golem crystal"}) end
+            elseif name=="enchantedFirstBossFollowOrb" then
+                local p=obj:FindFirstChild("innerBall")
+                if p then
+                    local expanding=p.Size.X>8 or p.Size.Z>8
+                    table.insert(out,{Kind="circle",Owners=record.Owners,Source=expanding and "Golem dome" or "Golem orb",CFrame=p.CFrame,Radius=expanding and 21 or math.max(p.Size.X,p.Size.Z)/2+1})
+                end
+            elseif name=="firstBossSpinningRock" then
+                local p=obj:FindFirstChild("cylinder")
+                if p then table.insert(out,{Kind="box",Owners=record.Owners,CFrame=p.CFrame,Size=p.Size,Source="Golem sweeper"}) end
+            end
+        end
+    end
+    return out
+end
+
+-- Visual hazards
+local visualParts={}
+local ignoredNames={abilities=true,vfxPool=true,sfxPool=true,map=true,borders=true,firstBossSafeZones=true,firstBossBuildZones=true,firstBossSupplyModels=true}
+local function isVisualCandidate(p)
+    if not p:IsA("BasePart") then return false end
+    local a=p.Parent
+    while a and a~=workspace do
+        if ignoredNames[a.Name] or a.Name=="EFPathfinderVisuals" or (a:IsA("Model") and a:FindFirstChildOfClass("Humanoid")) then return false end
+        a=a.Parent
+    end
+    local n=p.Name:lower()
+    return n=="precast" or n=="hitbox" or n:find("damagezone",1,true)~=nil
+end
+local function observe(p)
+    if isVisualCandidate(p) then visualParts[p]={Last=now(),Position=p.Position,Hazard={Source="visual"}} end
+end
+for _,p in ipairs(workspace:GetDescendants()) do observe(p) end
+connect(workspace.DescendantAdded,function(p) task.defer(function() if A.Alive and p.Parent then observe(p) end end) end)
+
+local function visualHazards(t,origin)
+    local out={}
+    for p,v in pairs(visualParts) do
+        if not p.Parent then visualParts[p]=nil
+        elseif dist(p.Position,origin)<200 and p.Transparency<0.96 then
+            local cf=p.CFrame;local size=p.Size
+            local circle=p:IsA("Part") and (p.Shape==Enum.PartType.Cylinder or p.Shape==Enum.PartType.Ball)
+            table.insert(out,{Kind=circle and "circle" or "box",CFrame=cf,Size=size,Radius=math.max(size.X,size.Y,size.Z)/2,Source=v.Hazard.Source})
+        end
+    end
+    return out
+end
+
+-- Enemies
+local enemyNames={["Mushroom Spearman"]=true,["Mushroom Wizard"]=true,["Poison Mushroom Mage"]=true,["Mushroom Battle Mage"]=true,["Crystal Golem"]=true,["Ancient Enchanted Tree"]=true,["Enchanted Forest Dragon"]=true,["Ancient Spirit"]=true}
+local function refreshEnemies()
+    table.clear(enemies)
+    for _,v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("Humanoid") and enemyNames[v.Parent.Name] and v.Health>0 then
+            local model=v.Parent; local root=model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+            if root then table.insert(enemies,{Model=model,Root=root,Humanoid=v}) end
+        end
+    end
+end
+
+local function chooseObjective(origin,t)
+    if A.GoalOverride then return A.GoalOverride,"Custom",true end
+    
+    local golemAlive=false
+    for _,e in ipairs(enemies) do if e.Model.Name=="Crystal Golem" and e.Humanoid.Health>0 then golemAlive=true;break end end
+    
+    if golemAlive and A.CrystalUntil and A.CrystalUntil>t then
+        local zones=workspace:FindFirstChild("firstBossSafeZones")
+        if zones then for _,p in ipairs(zones:GetChildren()) do
+            if p:IsA("BasePart") and p.Transparency<0.96 then return p.Position,"Crystal safe",true end
+        end end
+    end
+    
+    local best,score
+    for _,e in ipairs(enemies) do if e.Root.Parent and e.Humanoid.Health>0 then
+        local d=dist(origin,e.Root.Position)
+        if e.Model.Name=="Ancient Spirit" and d<100 then d=d-25 end
+        if A.Target==e.Model then d=d-6 end
+        if not score or d<score then best,score=e,d end
+    end end
+    
+    if not best then A.Target=nil; return nil,"No enemies",false end
+    
+    A.Target=best.Model
+    local pos=best.Root.Position
+    local delta=unit(origin-pos)
+    if delta.Magnitude<0.1 then delta=Vector3.xAxis end
+    local range=A.Config.Range
+    if best.Model.Name=="Mushroom Battle Mage" then range=math.max(range,45) end
+    if best.Model.Name=="Ancient Enchanted Tree" then range=math.max(range,70) end
+    return pos+delta*range,"Approaching "..best.Model.Name,false
+end
+
+-- Pathfinding
+local terrainCache={}
+local function quant(v,step) return math.floor(v/step+0.5) end
+local function terrainKey(a,b)
+    local q=1.5
+    return table.concat({quant(a.X,q),quant(a.Y,q),quant(a.Z,q),quant(b.X,q),quant(b.Y,q),quant(b.Z,q)},":")
+end
+
+local geometry=RaycastParams.new()
+geometry.FilterType=Enum.RaycastFilterType.Exclude
+geometry.RespectCanCollide=true
+
+local function refreshGeometry()
+    local excluded={}
+    for _,p in ipairs(Players:GetPlayers()) do if p.Character then table.insert(excluded,p.Character) end end
+    for _,e in ipairs(enemies) do table.insert(excluded,e.Model) end
+    geometry.FilterDescendantsInstances=excluded
+    table.clear(terrainCache)
+end
+
+local function grounded(p,referenceY)
+    local _,h,r=charParts()
+    local lift=h and r and h.HipHeight+r.Size.Y/2 or 3
+    local hit=workspace:Raycast(Vector3.new(p.X,referenceY-lift+3.5,p.Z),Vector3.new(0,-8.5,0),geometry)
+    if not hit then return nil end
+    if hit.Material==Enum.Material.Water then return nil end
+    if hit.Normal.Y<0.55 then return nil end
+    local rise=hit.Position.Y-(referenceY-lift)
+    if rise>3.1 or rise<-4.5 then return nil end
+    return Vector3.new(p.X,hit.Position.Y+lift,p.Z)
+end
+
+local function traversable(from,to)
+    local t=now()
+    local key=terrainKey(from,to)
+    local cached=terrainCache[key]
+    if cached and t-cached.Time<(A.Config.TerrainCacheTTL or 0.18) then return cached.Ok,cached.Pos end
+    
+    local delta=flat(to-from)
+    local current=grounded(from,from.Y)
+    if not current then terrainCache[key]={Time=t,Ok=false}; return false,nil end
+    if delta.Magnitude<0.05 then terrainCache[key]={Time=t,Ok=true,Pos=current}; return true,current end
+    
+    local count=math.max(1,math.ceil(delta.Magnitude/2.75))
+    local width=A.Config.AgentRadius*2
+    for i=1,count do
+        local p=from+delta*(i/count)
+        local nextRoot=grounded(p,current.Y)
+        if not nextRoot then terrainCache[key]={Time=t,Ok=false}; return false,nil end
+        local movement=nextRoot-current
+        if movement.Magnitude>0.01 then
+            local hit=workspace:Blockcast(CFrame.new(current+Vector3.new(0,0.2,0)),Vector3.new(width,3,width),movement,geometry)
+            if hit then terrainCache[key]={Time=t,Ok=false}; return false,nil end
+        end
+        current=nextRoot
+    end
+    terrainCache[key]={Time=t,Ok=true,Pos=current}
+    return true,current
+end
+
+local function hazardExposure(from,to,hazards,t,speed)
+    local length=dist(from,to);local steps=math.max(1,math.ceil(length/1.5));local cost=0
+    for i=1,steps do
+        local p=from:Lerp(to,i/steps);local arrival=t+length*i/steps/math.max(speed,1)
+        for _,h in ipairs(hazards) do
+            local c=clearance(h,p,arrival)
+            if c<0 then cost=cost+1+math.min(-c,12)*0.15 end
+        end
+    end
+    return cost/steps
+end
+
+-- Grid route with hazards
+local function gridRoute(origin,goal,hazards,t,maxNodes)
+    local step=4;local speed=A.Config.WalkSpeed;local frontier={};local nodes={}
+    local function push(n)
+        table.insert(frontier,n);local i=#frontier
+        while i>1 do local parent=math.floor(i/2);if frontier[parent].F<=n.F then break end;frontier[i]=frontier[parent];i=parent end
+        frontier[i]=n
+    end
+    local function pop()
+        local first=frontier[1];local last=table.remove(frontier)
+        if #frontier>0 then
+            local i=1
+            while i*2<=#frontier do local child=i*2;if child<#frontier and frontier[child+1].F<frontier[child].F then child=child+1 end
+                if frontier[child].F>=last.F then break end;frontier[i]=frontier[child];i=child end
+            frontier[i]=last
+        end
+        return first
+    end
+    local start={X=0,Z=0,Pos=origin,G=0,Length=0,F=dist(origin,goal)}
+    nodes["0:0"]=start;push(start)
+    local closest=start;local expansions=0;local solved=false;local finish
+    local limit=math.min(160,dist(origin,goal)+36)
+    while #frontier>0 and expansions<maxNodes do
+        local n=pop()
+        if not n.Closed and nodes[n.X..":"..n.Z]==n then
+            n.Closed=true;expansions=expansions+1
+            if dist(n.Pos,goal)<dist(closest.Pos,goal) then closest=n end
+            if dist(n.Pos,goal)<=step*1.5 then
+                local walk,endPos=traversable(n.Pos,goal)
+                if walk and hazardExposure(n.Pos,endPos,hazards,t+n.Length/speed,speed)==0 then
+                    finish={Pos=endPos,Parent=n};solved=true;break
+                end
+            end
+            for dx=-1,1 do for dz=-1,1 do if dx~=0 or dz~=0 then
+                local x,z=n.X+dx,n.Z+dz;local key=x..":"..z
+                local candidate=origin+Vector3.new(x*step,0,z*step)
+                if dist(origin,candidate)<=limit then
+                    local walk,p=traversable(n.Pos,candidate)
+                    if walk then
+                        local edge=(p-n.Pos).Magnitude
+                        local exposure=hazardExposure(n.Pos,p,hazards,t+n.Length/speed,speed)
+                        local startDanger=false
+                        if exposure>0 then for _,h in ipairs(hazards) do if clearance(h,n.Pos,t+n.Length/speed)<0 then startDanger=true;break end end end
+                        if exposure==0 or startDanger then
+                            local g=n.G+edge+exposure*1000
+                            if not nodes[key] or g<nodes[key].G then
+                                local nextNode={X=x,Z=z,Pos=p,G=g,Length=n.Length+edge,F=g+dist(p,goal),Parent=n}
+                                nodes[key]=nextNode;push(nextNode)
+                            end
+                        end
+                    end
+                end
+            end end end
+        end
+    end
+    finish=finish or (dist(closest.Pos,goal)<dist(origin,goal)-3 and closest or nil)
+    local route={}
+    while finish do table.insert(route,1,{Position=finish.Pos,Action=Enum.PathWaypointAction.Walk});finish=finish.Parent end
+    return route,solved,expansions
+end
+
+-- Planner
+local function plan(origin,goal,speed,t,hazards)
+    local desired=goal and unit(goal-origin) or ZERO
+    local immediateDanger=false
+    local nearDanger=false
+    for _,h in ipairs(hazards) do
+        local c=clearance(h,origin,t)
+        if c<1.5 then immediateDanger=true;nearDanger=true;break
+        elseif c<12 then nearDanger=true end
+    end
+    
+    local dirCount=immediateDanger and A.Config.EmergencyDirections or nearDanger and A.Config.DangerDirections or A.Config.SafeDirections
+    local samples=immediateDanger and A.Config.EmergencySamples or nearDanger and A.Config.DangerSamples or A.Config.SafeSamples
+    
+    local candidates={ZERO}
+    if desired.Magnitude>0 then table.insert(candidates,desired) end
+    for i=0,dirCount-1 do
+        table.insert(candidates,Vector3.new(math.cos(i*2*math.pi/dirCount),0,math.sin(i*2*math.pi/dirCount)))
+    end
+    
+    local best,bestScore,bestRisk,bestEnd=ZERO,math.huge,math.huge,origin
+    for _,dir in ipairs(candidates) do
+        local valid=true;local maxTravel=0;local endPos=origin
+        if dir.Magnitude>0 then
+            local targetDistance=speed*A.Config.Horizon
+            if goal and desired.Magnitude>0 and dir:Dot(desired)>0.999 then targetDistance=math.min(targetDistance,dist(origin,goal)) end
+            local wanted=origin+dir*targetDistance
+            local walk,safeEnd=traversable(origin,wanted)
+            if walk and safeEnd then maxTravel=dist(origin,safeEnd);endPos=safeEnd else valid=false end
+        end
+        if valid then
+            local exposure=0
+            for k=1,samples do
+                local dt=A.Config.Horizon*k/samples;local ft=t+dt
+                local pos=origin+dir*math.min(speed*dt,maxTravel)
+                for _,h in ipairs(hazards) do
+                    local c=clearance(h,pos,ft)
+                    if c<0 then exposure=exposure+(1+math.min(-c,15)*0.15)*(samples+1-k) end
+                end
+            end
+            local progress=goal and dist(endPos,goal) or dist(origin,endPos)*0.2
+            local turn=(dir-A.Direction).Magnitude*1.5
+            local score=exposure*10000+progress+turn
+            if score<bestScore then best,bestScore,bestRisk,bestEnd=dir,score,exposure,endPos end
+        end
+    end
+    A.Stats.PlannerMode=immediateDanger and "emergency" or nearDanger and "danger" or "cruise"
+    return best,bestRisk,bestEnd,bestScore<math.huge
+end
+
+-- Skills
+local castAttemptAt={}
+local pendingCasts={}
+local lastCastAt=0
+local function equippedSkills()
+    local result={}
+    for _,container in ipairs({player:FindFirstChild("Backpack"),player.Character}) do
+        if container then for _,tool in ipairs(container:GetChildren()) do
+            local slot=tool:FindFirstChild("abilitySlot")
+            local event=tool:FindFirstChild("localEvent")
+            if slot and (slot.Value=="q" or slot.Value=="e") and event and event:IsA("BindableEvent") then
+                table.insert(result,{Tool=tool,Event=event,Slot=slot.Value,Buff=tool:FindFirstChild("buffPower")~=nil})
+            end
+        end end
+    end
+    table.sort(result,function(a,b) if a.Buff~=b.Buff then return a.Buff end return a.Slot<b.Slot end)
+    return result
+end
+
+local function castSkills(t,hum,root)
+    for tool,p in pairs(pendingCasts) do
+        local cooldown=tool.Parent and tool:FindFirstChild("cooldown")
+        if cooldown and cooldown.Value>0 then
+            A.Stats.ConfirmedCasts+=1;pendingCasts[tool]=nil
+        elseif t-p.Time>1.5 then pendingCasts[tool]=nil end
+    end
+    if not A.Config.AutoSkills or t-lastCastAt<0.18 then return end
+    local target=A.Target
+    local targetHum=target and target:FindFirstChildOfClass("Humanoid")
+    local targetRoot=target and (target:FindFirstChild("HumanoidRootPart") or target.PrimaryPart)
+    if not targetRoot or not targetHum or targetHum.Health<=0 then return end
+    local busy=player.Character and player.Character:FindFirstChild("busyCasting")
+    if busy and busy.Value then return end
+    local distance=dist(root.Position,targetRoot.Position)
+    if distance>A.Config.CastRange then return end
+    local delta=targetRoot.Position-root.Position
+    if delta.Magnitude>0.1 and workspace:Raycast(root.Position,delta,geometry) then return end
+    for _,s in ipairs(equippedSkills()) do
+        local cd=s.Tool:FindFirstChild("cooldown")
+        if cd and cd.Value<=0 and t-(castAttemptAt[s.Tool] or -math.huge)>0.65 then
+            local facing=flat(root.CFrame.LookVector):Dot(unit(delta))>0.9
+            if s.Buff or facing then
+                castAttemptAt[s.Tool]=t;lastCastAt=t;pendingCasts[s.Tool]={Time=t}
+                A.Stats.CastRequests+=1;s.Event:Fire();return
+            end
+        end
+    end
+end
+
+-- AURORA GALAXY HUD
+local gui=Instance.new("ScreenGui")
+gui.Name="AuroraPathfinder"
+gui.ResetOnSpawn=false
+gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+gui.Parent=player:WaitForChild("PlayerGui")
+
+-- Main aurora panel
+local mainFrame=Instance.new("Frame")
+mainFrame.Name="Main"
+mainFrame.Size=UDim2.fromOffset(360, 220)
+mainFrame.Position=UDim2.new(1, -380, 1, -240)
+mainFrame.BackgroundColor3=Color3.fromRGB(10, 15, 30)
+mainFrame.BackgroundTransparency=0.1
+mainFrame.BorderSizePixel=0
+mainFrame.Parent=gui
+
+-- Animated aurora gradient
+local auroraGradient=Instance.new("UIGradient")
+auroraGradient.Color=ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(15, 35, 55)),
+    ColorSequenceKeypoint.new(0.25, Color3.fromRGB(25, 55, 75)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(35, 85, 95)),
+    ColorSequenceKeypoint.new(0.75, Color3.fromRGB(25, 65, 85)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 40, 60))
+})
+auroraGradient.Rotation=45
+auroraGradient.Parent=mainFrame
+
+-- Animate gradient
+spawn(function()
+    while mainFrame.Parent do
+        for i=0, 360, 1 do
+            if not mainFrame.Parent then break end
+            auroraGradient.Rotation=i
+            wait(0.03)
+        end
+    end
+end)
+
+-- Glass border glow
+local stroke=Instance.new("UIStroke")
+stroke.Color=Color3.fromRGB(80, 220, 180)
+stroke.Thickness=2
+stroke.Transparency=0.3
+stroke.Parent=mainFrame
+
+local corner=Instance.new("UICorner")
+corner.CornerRadius=UDim.new(0, 24)
+corner.Parent=mainFrame
+
+-- Outer glow
+local glow=Instance.new("ImageLabel")
+glow.Name="Glow"
+glow.BackgroundTransparency=1
+glow.Image="rbxassetid://4996893366"
+glow.ImageColor3=Color3.fromRGB(60, 200, 160)
+glow.ImageTransparency=0.85
+glow.ScaleType=Enum.ScaleType.Slice
+glow.SliceCenter=Rect.new(20,20,80,80)
+glow.Size=UDim2.new(1,60,1,60)
+glow.Position=UDim2.new(0,-30,0,-30)
+glow.ZIndex=-1
+glow.Parent=mainFrame
+
+-- Logo button (circular, top)
+local logoBtn=Instance.new("ImageButton")
+logoBtn.Name="Logo"
+logoBtn.Size=UDim2.fromOffset(75,75)
+logoBtn.Position=UDim2.new(0.5,-37.5,0,-37.5)
+logoBtn.BackgroundColor3=Color3.fromRGB(30,60,80)
+logoBtn.BorderSizePixel=0
+logoBtn.AutoButtonColor=false
+logoBtn.ZIndex=10
+logoBtn.Parent=mainFrame
+
+local logoCorner=Instance.new("UICorner")
+logoCorner.CornerRadius=UDim.new(1,0)
+logoCorner.Parent=logoBtn
+
+local logoStroke=Instance.new("UIStroke")
+logoStroke.Color=Color3.fromRGB(100,255,200)
+logoStroke.Thickness=3
+logoStroke.Parent=logoBtn
+
+local logoText=Instance.new("TextLabel")
+logoText.Size=UDim2.fromScale(1,1)
+logoText.BackgroundTransparency=1
+logoText.Text="✦"
+logoText.TextColor3=Color3.fromRGB(150,255,220)
+logoText.Font=Enum.Font.GothamBold
+logoText.TextSize=40
+logoText.ZIndex=11
+logoText.Parent=logoBtn
+
+-- Title
+local title=Instance.new("TextLabel")
+title.Size=UDim2.new(1,-100,0,28)
+title.Position=UDim2.new(0,20,0,45)
+title.BackgroundTransparency=1
+title.Text="AURORA PATHFINDER"
+title.TextColor3=Color3.fromRGB(200,255,240)
+title.Font=Enum.Font.GothamBold
+title.TextSize=18
+title.TextXAlignment=Enum.TextXAlignment.Left
+title.Parent=mainFrame
+
+-- Made by
+local madeBy=Instance.new("TextLabel")
+madeBy.Size=UDim2.new(0,100,0,20)
+madeBy.Position=UDim2.new(1,-110,0,48)
+madeBy.BackgroundTransparency=1
+madeBy.Text="by disappear"
+madeBy.TextColor3=Color3.fromRGB(140,200,170)
+madeBy.Font=Enum.Font.Gotham
+madeBy.TextSize=11
+madeBy.TextXAlignment=Enum.TextXAlignment.Right
+madeBy.Parent=mainFrame
+
+-- Status box
+local statusBox=Instance.new("Frame")
+statusBox.Size=UDim2.new(1,-40,0,55)
+statusBox.Position=UDim2.new(0,20,0,80)
+statusBox.BackgroundColor3=Color3.fromRGB(0,0,0)
+statusBox.BackgroundTransparency=0.6
+statusBox.BorderSizePixel=0
+statusBox.Parent=mainFrame
+
+local statusCorner=Instance.new("UICorner")
+statusCorner.CornerRadius=UDim.new(0,14)
+statusCorner.Parent=statusBox
+
+local statusLabel=Instance.new("TextLabel")
+statusLabel.Size=UDim2.new(1,-20,1,0)
+statusLabel.Position=UDim2.new(0,10,0,0)
+statusLabel.BackgroundTransparency=1
+statusLabel.Text="Ready"
+statusLabel.TextColor3=Color3.fromRGB(180,255,220)
+statusLabel.Font=Enum.Font.Gotham
+statusLabel.TextSize=13
+statusLabel.TextWrapped=true
+statusLabel.TextXAlignment=Enum.TextXAlignment.Left
+statusLabel.Parent=statusBox
+
+-- Stats
+local statsLabel=Instance.new("TextLabel")
+statsLabel.Size=UDim2.new(1,-40,0,20)
+statsLabel.Position=UDim2.new(0,20,0,138)
+statsLabel.BackgroundTransparency=1
+statsLabel.Text="Range: 36 | Skills: ON | Mode: cruise"
+statsLabel.TextColor3=Color3.fromRGB(130,190,170)
+statsLabel.Font=Enum.Font.Gotham
+statsLabel.TextSize=11
+statsLabel.TextXAlignment=Enum.TextXAlignment.Left
+statsLabel.Parent=mainFrame
+
+-- Button container
+local btnContainer=Instance.new("Frame")
+btnContainer.Size=UDim2.new(1,-40,0,45)
+btnContainer.Position=UDim2.new(0,20,0,165)
+btnContainer.BackgroundTransparency=1
+btnContainer.Parent=mainFrame
+
+-- Modern button function
+local function createAuroraButton(text, accentColor, parent, xPos)
+    local btn=Instance.new("TextButton")
+    btn.Size=UDim2.fromOffset(100,40)
+    btn.Position=UDim2.new(0,xPos,0,2)
+    btn.BackgroundColor3=Color3.fromRGB(40,70,90)
+    btn.BackgroundTransparency=0.2
+    btn.Text=text
+    btn.TextColor3=Color3.fromRGB(230,255,240)
+    btn.Font=Enum.Font.GothamBold
+    btn.TextSize=12
+    btn.AutoButtonColor=false
+    btn.Parent=parent
+    
+    local btnCorner=Instance.new("UICorner")
+    btnCorner.CornerRadius=UDim.new(0,12)
+    btnCorner.Parent=btn
+    
+    local btnStroke=Instance.new("UIStroke")
+    btnStroke.Color=accentColor or Color3.fromRGB(100,200,180)
+    btnStroke.Thickness=1.5
+    btnStroke.Transparency=0.4
+    btnStroke.Parent=btn
+    
+    -- Smooth hover
+    btn.MouseEnter:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.2), {BackgroundTransparency=0, Size=UDim2.fromOffset(104,42), Position=UDim2.new(0,xPos-2,0,1)}):Play()
+    end)
+    btn.MouseLeave:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.2), {BackgroundTransparency=0.2, Size=UDim2.fromOffset(100,40), Position=UDim2.new(0,xPos,0,2)}):Play()
+    end)
+    
+    return btn
+end
+
+-- Start button
+local startBtn=createAuroraButton("▶ START", Color3.fromRGB(100,255,180), btnContainer, 0)
+startBtn.Activated:Connect(function() A:SetRunning(not A.Running) end)
+
+-- Range button
+local rangeBtn=createAuroraButton("RANGE: 36", Color3.fromRGB(120,180,255), btnContainer, 110)
+rangeBtn.Activated:Connect(function()
+    A.Config.Range = A.Config.Range==36 and 46 or A.Config.Range==46 and 56 or A.Config.Range==56 and 66 or 36
+end)
+
+-- Skills button
+local skillsBtn=createAuroraButton("SKILLS: ON", Color3.fromRGB(180,140,255), btnContainer, 220)
+skillsBtn.Activated:Connect(function()
+    A.Config.AutoSkills = not A.Config.AutoSkills
+end)
+
+-- Minimize toggle
+local minimized=false
+logoBtn.Activated:Connect(function()
+    minimized=not minimized
+    if minimized then
+        TweenService:Create(mainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quart), {Size=UDim2.fromOffset(360,0), Position=UDim2.new(1,-380,1,-20)}):Play()
+    else
+        TweenService:Create(mainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Quart), {Size=UDim2.fromOffset(360,220), Position=UDim2.new(1,-380,1,-240)}):Play()
+    end
+end)
+
+-- Keybinds
+connect(UIS.InputBegan, function(input, processed)
+    if processed then return end
+    if input.KeyCode==Enum.KeyCode.P then A:SetRunning(not A.Running)
+    elseif input.KeyCode==Enum.KeyCode.End then A:Destroy() end
+end)
+
+-- Auto-restart
+connect(player.CharacterAdded, function()
+    local wasRunning=A.WasRunning
+    A:SetRunning(false)
+    if A.Config.AutoRestart and wasRunning then
+        wait(2)
+        if A.Alive then A:SetRunning(true) end
+    end
+end)
+
+-- Destroy
+function A:Destroy()
+    self.Alive=false
+    self:SetRunning(false)
+    for _,c in ipairs(self.Connections) do pcall(function() c:Disconnect() end) end
+    gui:Destroy()
+    if env.EFPathfinder==self then env.EFPathfinder=nil end
+end
+
+-- Visual route dots
+local visuals=Instance.new("Folder")
+visuals.Name="EFPathfinderVisuals"
+visuals.Parent=workspace
+local dots={}
+for i=1,18 do
+    local p=Instance.new("Part")
+    p.Name="RouteDot"
+    p.Shape=Enum.PartType.Ball
+    p.Size=Vector3.new(0.6,0.6,0.6)
+    p.Anchored=true
+    p.CanCollide=false
+    p.CanTouch=false
+    p.CanQuery=false
+    p.Material=Enum.Material.Neon
+    p.Color=Color3.fromRGB(100,255,200)
+    p.Transparency=1
+    p.Parent=visuals
+    dots[i]=p
+end
+
+-- MAIN LOOP - Full dodging restored
+local lastPlan=0
+local lastEnemies=0
+local lastVisual=0
+
+connect(RunService.Heartbeat, function()
+    if not A.Alive then return end
+    local t=now()
+    
+    -- Smooth UI update (no blink)
+    if t-A.LastUIUpdate>0.2 then
+        A.LastUIUpdate=t
+        startBtn.Text=A.Running and "⏸ PAUSE" or "▶ START"
+        startBtn.BackgroundColor3=A.Running and Color3.fromRGB(140,80,60) or Color3.fromRGB(40,70,90)
+        rangeBtn.Text="RANGE: "..A.Config.Range
+        skillsBtn.Text=A.Config.AutoSkills and "SKILLS: ON" or "SKILLS: OFF"
+        skillsBtn.BackgroundColor3=A.Config.AutoSkills and Color3.fromRGB(40,70,90) or Color3.fromRGB(90,50,50)
+        statusLabel.Text=A.Status
+        statsLabel.Text=string.format("Range: %d | Skills: %s | Mode: %s | Hazards: %d", 
+            A.Config.Range, 
+            A.Config.AutoSkills and "ON" or "OFF",
+            A.Stats.PlannerMode or "cruise",
+            A.Stats.RelevantHazards or 0)
+    end
+    
+    -- Pathfinding tick
+    if t-lastPlan<A.Config.Tick then return end
+    lastPlan=t
+    
+    local _,hum,root=charParts()
+    if not hum or not root then return end
+    
+    if t-lastEnemies>1 then refreshEnemies();refreshGeometry();lastEnemies=t end
+    
+    if A.Running then
+        if hum.Health<=0 then
+            A:SetRunning(false)
+            A.Status="Died - Auto-restarting..."
+            return
+        end
+        
+        local origin=root.Position
+        local goal,state,mandatory=chooseObjective(origin,t)
+        A.Goal=goal
+        
+        -- Collect all hazards
+        refreshHazards(t)
+        local allHazards={}
+        for _,h in ipairs(visualHazards(t,origin)) do table.insert(allHazards,h) end
+        for _,h in ipairs(golemHazards(t,origin)) do table.insert(allHazards,h) end
+        for _,h in ipairs(A.Hazards) do table.insert(allHazards,h) end
+        for _,e in ipairs(enemies) do if e.Root.Parent and e.Humanoid.Health>0 and dist(origin,e.Root.Position)<70 then
+            if e.Model.Name=="Mushroom Spearman" then
+                table.insert(allHazards,{Kind="circle",CFrame=e.Root.CFrame,Radius=9,Source="melee"})
+            elseif e.Model.Name=="Mushroom Battle Mage" then
+                table.insert(allHazards,{Kind="circle",CFrame=e.Root.CFrame,Radius=A.Config.BattleMageKeepout or 28,Source="mage"})
+            end
+        end end
+        
+        -- Plan with dodging
+        local dir,risk,endpoint,hasPlan=plan(origin,goal,hum.WalkSpeed,t,allHazards)
+        A.Direction=dir
+        A.Stats.RelevantHazards=#allHazards
+        A.Stats.Risk=risk
+        
+        if hasPlan then
+            hum:Move(dir,false)
+        else
+            hum:Move(ZERO,false)
+        end
+        
+        -- Cast skills
+        castSkills(t,hum,root)
+        A.Status=state
+        if risk>0 then A.Status="Dodging attacks..." end
+    else
+        hum:Move(ZERO,false)
+    end
+    
+    -- Update visual dots
+    if t-lastVisual>0.2 then
+        lastVisual=t
+        for _,p in ipairs(dots) do p.Transparency=1 end
+        if A.Running and A.Config.ShowPath and root then
+            if A.Endpoint then for i=1,8 do dots[i].Position=root.Position:Lerp(A.Endpoint,i/8)-Vector3.new(0,2.3,0);dots[i].Transparency=0 end end
+        end
+    end
+end)
+
+-- Auto-start
+if A.Config.AutoStart then
+    spawn(function()
+        wait(1)
+        while not mapIsSupported() do wait(0.5) end
+        wait(0.5)
+        if A.Alive then A:SetRunning(true) end
+    end)
+end
+
+print("✦ Aurora Pathfinder v0.7.1 loaded - Full dodging + Smooth UI")
+return A
